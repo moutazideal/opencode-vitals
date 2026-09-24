@@ -13,11 +13,15 @@
     "bar.py",
     "start-bar.sh",
     "selftest.py",
+    "selftest.mjs",
     "docs/bar.png",
     "docs/bar-mini.png",
     "README.md",
     "LICENSE"
   ],
+  "bin": {
+    "opencode-vitals-selftest": "selftest.mjs"
+  },
   "scripts": {
     "test": "node tests/vitals.test.mjs && python3 tests/bar.test.py",
     "selftest": "python3 selftest.py",

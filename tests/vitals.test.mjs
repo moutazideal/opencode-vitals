@@ -636,6 +636,28 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   rmSync(sandbox, { recursive: true, force: true })
 }
 
+// 22. The README cannot promise a command that does not exist.
+{
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+  const bins = manifest.bin ?? {}
+  const commands = [...readme.matchAll(/npx\s+([\w-]+)/g)].map((match) => match[1])
+  check("README shows an npx command", commands.length > 0, JSON.stringify(commands))
+  for (const command of new Set(commands)) {
+    check(`npx ${command} is a declared bin`, Object.hasOwn(bins, command), JSON.stringify(Object.keys(bins)))
+    if (Object.hasOwn(bins, command)) {
+      const target = bins[command]
+      check(`bin ${command} ships in the package`, (manifest.files ?? []).includes(target), target)
+      check(`bin ${command} exists on disk`, existsSync(new URL(`../${target}`, import.meta.url)), target)
+    }
+  }
+  check("README documents the plugins config key", /"plugins"\s*:/.test(readme) && readme.includes("opencode-vitals"))
+  check("README links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
+  for (const image of [...readme.matchAll(/src="([^"]+\.png)"/g)].map((match) => match[1])) {
+    check(`README image ${image} exists`, existsSync(new URL(`../${image}`, import.meta.url)))
+  }
+}
+
 for (const result of results) {
   console.log(`${result.ok ? "ok  " : "FAIL"} ${result.name}${result.detail ? ` ${result.detail}` : ""}`)
 }

@@ -14,6 +14,31 @@
 
 ---
 
+## Quick install
+
+**1 — Check your machine first.** It takes ten seconds and tells you whether the bar can run here:
+
+```bash
+npx opencode-vitals-selftest
+```
+
+**2 — Add one line** to `opencode.json` or `opencode.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-vitals"]
+}
+```
+
+**3 — Restart OpenCode.** The bar is on screen within seconds.
+
+That is the whole installation. Prefer no config file? Copy the folder to
+`~/.config/opencode/plugins/opencode-vitals/` and OpenCode finds it on its own. Want to change the
+history size or turn the bar off? Use the object form in [Options](#options).
+
+---
+
 ## Why
 
 You can feel that a session got slower. You cannot see it.
@@ -154,7 +179,9 @@ disappearing. Run the selftest on your machine and you will know in ten seconds.
 ## Does it work here? Ask the plugin
 
 ```bash
-npx opencode-vitals selftest     # or: python3 selftest.py
+npx opencode-vitals-selftest    # after installing from npm
+node selftest.mjs               # from a clone
+python3 selftest.py             # with Python directly
 ```
 
 ```

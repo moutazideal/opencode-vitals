@@ -1,0 +1,40 @@
+{
+  "name": "opencode-vitals",
+  "version": "0.9.0",
+  "description": "OpenCode V2 plugin that shows session turns, steps, and average streaming tok/s in a small always-on-top bar",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "bar.py",
+    "start-bar.sh",
+    "selftest.py",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node tests/vitals.test.mjs && python3 tests/bar.test.py",
+    "selftest": "python3 selftest.py",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "vitals",
+    "latency",
+    "tokens-per-second",
+    "benchmark",
+    "observability",
+    "tkinter"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

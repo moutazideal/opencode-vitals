@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs"
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin, { vitalsInternals } from "../index.js"
@@ -604,6 +604,35 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const stored = JSON.parse(readFileSync(versionFile, "utf8"))
   check("stored update keeps both versions", stored.version === own && stored.previous === "0.0.1-old", JSON.stringify(stored))
   check("stored update is timestamped", typeof stored.updatedAt === "number" && stored.updatedAt > 0, JSON.stringify(stored.updatedAt))
+  rmSync(sandbox, { recursive: true, force: true })
+}
+
+// 21. Markers are pruned on their own, without waiting for a new response.
+{
+  const sandbox = mkdtempSync(join(tmpdir(), "vitals-prune-"))
+  const isolated = await withTmpDir(sandbox, () => import(`../index.js?prune=${Date.now()}`))
+  const statusDir = join(sandbox, "opencode-latency-monitor")
+  mkdirSync(statusDir, { recursive: true })
+  const old = join(statusDir, "response-old.marker")
+  const fresh = join(statusDir, "response-fresh.marker")
+  const unrelated = join(statusDir, "latest.json")
+  writeFileSync(old, "{}")
+  writeFileSync(fresh, "{}")
+  writeFileSync(unrelated, "{}")
+  const longAgo = new Date(Date.now() - isolated.vitalsInternals.RESPONSE_MARKER_TTL_MS - 60_000)
+  utimesSync(old, longAgo, longAgo)
+  await isolated.vitalsInternals.pruneResponseMarkers({ force: true })
+  check("stale marker removed", !existsSync(old), old)
+  check("fresh marker kept", existsSync(fresh))
+  check("unrelated files untouched", existsSync(unrelated))
+
+  // The claim/prune pair must not delete a marker another instance just wrote.
+  const claimed = await isolated.vitalsInternals.claimResponse("turn-key-alpha")
+  check("first claim wins", claimed === true)
+  const duplicate = await isolated.vitalsInternals.claimResponse("turn-key-alpha")
+  check("duplicate claim is refused", duplicate === false)
+  const other = await isolated.vitalsInternals.claimResponse("turn-key-beta")
+  check("different key claims", other === true)
   rmSync(sandbox, { recursive: true, force: true })
 }
 

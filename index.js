@@ -53,7 +53,7 @@ function runtimeFor(location) {
   const key = location || "__global__"
   let runtime = root.get(key)
   if (!runtime) {
-    runtime = { controller: null, companionTimer: null }
+    runtime = { controller: null, companionTimer: null, markerTimer: null }
     root.set(key, runtime)
   }
   return runtime
@@ -302,9 +302,12 @@ async function publishStatus(record) {
   await writeJsonAtomic(STATUS_FILE, record)
 }
 
-async function pruneResponseMarkers() {
+// Pruning is throttled on a timestamp shared by every plugin instance in the
+// process, so one instance's sweep also covers the others. `force` skips the
+// throttle, which the tests need and a first run at startup may want.
+async function pruneResponseMarkers({ force = false } = {}) {
   const attemptedAt = now()
-  if (attemptedAt - companions.lastMarkerPruneAt < MARKER_PRUNE_INTERVAL_MS) return
+  if (!force && attemptedAt - companions.lastMarkerPruneAt < MARKER_PRUNE_INTERVAL_MS) return
   companions.lastMarkerPruneAt = attemptedAt
   try {
     const names = await readdir(STATUS_DIR)
@@ -1214,12 +1217,15 @@ function createState(rawOptions) {
 export const vitalsInternals = {
   DESKTOP_PROCESS_NAMES,
   DESKTOP_MISSING_GRACE_MS,
+  RESPONSE_MARKER_TTL_MS,
   scanDesktopProcess,
   processListDecision,
   barExpectedFrom,
   stopPopup,
   readOwnVersion,
   notePluginVersion,
+  claimResponse,
+  pruneResponseMarkers,
 }
 
 export default {
@@ -1232,12 +1238,15 @@ export default {
     runtime.controller = controller
     const state = createState(ctx.options)
     let companionTimer = null
+    let markerTimer = null
     const cleanup = () => {
       controller.abort()
       if (companionTimer && runtime.companionTimer === companionTimer) {
         clearInterval(companionTimer)
         runtime.companionTimer = null
       }
+      if (markerTimer) clearInterval(markerTimer)
+      if (runtime.markerTimer === markerTimer) runtime.markerTimer = null
       if (runtime.controller === controller) runtime.controller = null
     }
     if (state.options.popup) startPopup(runtime)
@@ -1255,6 +1264,13 @@ export default {
     }
     state.setStorage(ctx.storage)
     await state.load()
+    // Markers used to be pruned only when a new response arrived, so a dormant
+    // plugin — which is exactly what the long-lived service becomes once the app
+    // is closed — kept every marker forever. The timer makes cleanup independent
+    // of activity.
+    markerTimer = setInterval(() => void pruneResponseMarkers(), MARKER_PRUNE_INTERVAL_MS)
+    markerTimer.unref?.()
+    runtime.markerTimer = markerTimer
     const version = await notePluginVersion()
     state.log(ctx, version.changed ? `updated ${version.previous ?? "none"} -> ${version.version}` : `loaded ${version.version}`)
 

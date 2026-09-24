@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 *.tgz
 .DS_Store
+
+# The global gitignore blocks *.png in every repository; these two are the
+# README screenshots, small and intentional.
+!docs/*.png

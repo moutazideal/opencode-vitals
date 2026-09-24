@@ -1,27 +1,83 @@
-# OpenCode Vitals
+<div align="center">
+  <img src="docs/bar.png" width="440" alt="The OpenCode Vitals bar: a dark always-on-top card reading 19 turns 65 steps · 291 tok/s, with a gauge on the left and a close button on the right">
+  <h1>OpenCode Vitals</h1>
+  <p><strong>Stop guessing how fast your model is. Watch it.</strong></p>
+  <p>A tiny always-on-top bar for OpenCode V2 that shows one honest line for the session you are
+  working in: turns, steps, and average streaming tokens per second.</p>
+  <p>
+    <img alt="platform: Linux verified, macOS and Windows expected" src="https://img.shields.io/badge/platform-Linux%20verified%20%7C%20macOS%20%2B%20Windows%20expected-2ea44f">
+    <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-2ea44f">
+    <img alt="network calls: none" src="https://img.shields.io/badge/network%20calls-none-2ea44f">
+    <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-8b5cf6">
+  </p>
+</div>
 
-A local OpenCode V2 plugin that measures each response and shows one compact session line in a small
-always-on-top bar:
+---
+
+## Why
+
+You can feel that a session got slower. You cannot see it.
+
+Every dashboard OpenCode ships answers a different question — cost, token count, context size — and
+none of them answer the one you actually have while you work: **is this session fast, and is it
+getting slower?** Model output arrives in a stream, so the number that matters is throughput while
+the model is generating, not the wall-clock time of a turn that also ran a build, a test, and three
+tool calls.
+
+OpenCode Vitals puts that number on your screen, in the corner, all session long.
+
+## What you get
 
 ```
-◔ 10 turns 245 steps · 274 tok/s
+◔ 19 turns 65 steps · 291 tok/s
 ```
 
-- **turns** — completed responses in the session;
-- **steps** — model steps across those responses;
-- **tok/s** — session average: generated tokens (output + reasoning) divided by active stream time,
-  so tool executions between steps stay out of the denominator.
+- **Always on top, never in the way.** 360×54 pixels, undecorated, no taskbar entry, no focus
+  steal. Drag it anywhere; the position is remembered. Click `×` and it collapses to a small square
+  that keeps showing tok/s; click the square to bring it back.
+- **Session-wide, not last-message.** The three numbers aggregate the whole session you are looking
+  at, so a single fast reply cannot flatter a slow session.
+- **It follows your tab.** Switch sessions in the Desktop app and the bar switches with it.
+- **It leaves when you do.** Close OpenCode and the bar goes with it; nothing is left on screen.
+- **It tells you when it updated.** A new version announces itself once, in place of the numbers.
 
-Compaction executions and synthetic inbox items are excluded. Duplicate completion events, late
-deltas, and repeated plugin instances are deduplicated. Only timing metadata, token counts, and
-session/message identifiers are stored; prompts and response text are never stored.
+<p align="center">
+  <img src="docs/bar-mini.png" width="120" alt="The collapsed bar: a small square showing the session tokens per second under a TOK/S caption">
+</p>
+
+## The numbers, exactly
+
+No estimates, no invented numbers. Every value is read from OpenCode's own event stream.
+
+| Number | What it is |
+| --- | --- |
+| **turns** | Responses completed in this session. |
+| **steps** | Model steps across those responses, so a response that called tools five times is not mistaken for a fast one. |
+| **tok/s** | `generated tokens ÷ active stream time`, where generated tokens are output plus reasoning tokens, and active stream time is the time the model was actually streaming. Tool executions between steps stay **out** of the denominator. |
+
+Deliberately excluded, because including them would flatter the number:
+
+- **Compaction executions** and synthetic inbox items — they are not your work.
+- **Duplicate completions, late deltas, and repeated plugin instances** — deduplicated by event and
+  response identity, so a reconnect cannot inflate a session.
+- **Wall-clock turn time** — it mixes model thinking with your tools.
+
+If the provider reports no token counts, `tok/s` shows `–` instead of guessing. Per-turn detail
+(`firstTokenMs`, `firstTextMs`, `firstCharMs`, `totalMs`, `activeStreamMs`, per-model and per-agent
+token counts) stays in the plugin's own storage, capped at 100 records, if you want to compute
+something else.
 
 ## Install
 
-From npm, add the package to your `opencode.json(c)`:
+OpenCode installs npm plugins itself with Bun at startup, so installing is one config entry and a
+restart.
 
-```json
+### From npm, with options
+
+```jsonc
+// opencode.json or opencode.jsonc
 {
+  "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
       "package": "opencode-vitals",
@@ -33,147 +89,181 @@ From npm, add the package to your `opencode.json(c)`:
 }
 ```
 
-Or copy this folder into the global plugin directory (`~/.config/opencode/plugins/opencode-vitals/`
-on Linux); OpenCode discovers it automatically.
+### From npm, defaults only
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-vitals"]
+}
+```
+
+Restart OpenCode and the bar is there within seconds.
+
+### By copying the folder
+
+Files in the plugin directory are loaded automatically, with no configuration at all:
+
+```bash
+mkdir -p ~/.config/opencode/plugins
+cp -r opencode-vitals ~/.config/opencode/plugins/opencode-vitals
+```
+
+### From source, while you work on it
+
+```bash
+git clone https://github.com/<your-account>/opencode-vitals.git
+ln -s "$PWD/opencode-vitals" ~/.config/opencode/plugins/opencode-vitals
+```
+
+Edits reach the running plugin within five seconds — no restart. Keep the link under the folder name
+OpenCode already discovered, or the running instance will be left pointing at nothing.
 
 ## Requirements
 
-- **OpenCode V2** (verified against 2.0.14).
-- **Node 18+** for the plugin.
-- **Python 3.9+ with tkinter** for the bar. Tkinter is bundled with the official Python installers on
-  Windows and macOS; on Ubuntu it is the small `python3-tk` package and is usually already present.
-  There is no GTK, `gi`, sqlite, or other dependency.
-- No display (server/CI): the plugin still records measurements; the bar is skipped automatically.
-- The bar runs on Linux, macOS, and Windows. On macOS the "always on top" hint is best-effort when
-  another app is fullscreen.
+| | |
+| --- | --- |
+| OpenCode | V2 (developed against 2.0.14 and 2.0.16) |
+| Node | 18 or newer, for the plugin |
+| Python | 3.9+ **with tkinter**, for the bar |
+| Packages to install | **none** |
 
-## Use
+tkinter ships with the official Python installers on Windows and macOS. On Debian/Ubuntu it is the
+small `python3-tk` package, usually already present on a desktop machine. On a headless server
+(SSH, CI, container) the bar is skipped and measurement still runs.
 
-The bar starts automatically with the plugin. Drag it anywhere; the position is remembered. Click the
-`×` to collapse it into a small square showing the live session `tok/s`; click the square to expand it
-again (dragging the square also moves it). Hovering is not required — the bar always shows the
-current session.
+## Platform support
 
-The tracked session is the one OpenCode reports as viewed (`session.viewed`), or the session of your
-latest prompt when the app's own record is unavailable. When the plugin files change, the bar
-replaces the previous revision automatically within seconds; no restart is needed.
+Being straight about this, because "works everywhere" is usually a claim nobody checked:
 
-### Which session the bar follows
+| | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Measurement core | **tested** | same code, no OS calls | same code, no OS calls |
+| Bar window | **tested** — GNOME/Mutter on X11: undecorated managed window, `_NET_WM_STATE_ABOVE`, drag, collapse, saved position | expected — Tk undecorated + topmost; best-effort against fullscreen apps | expected — Tk undecorated + topmost |
+| Follows the open tab | **tested** — `~/.config/ai.opencode.desktop/drafts.sqlite` | `~/Library/Application Support/…` (Electron convention) | `%APPDATA%\…` (Electron convention) |
+| Leaves with the app | **tested** — `/proc` scan | `pgrep` per name | `tasklist` per name |
 
-The bar follows the tab you are looking at in the Desktop app. OpenCode publishes no event when a
-tab is opened, so the bar reads the app's own record of the open tab (`tabs.recent` in its
-`drafts.sqlite`) — opened read-only, one row, no lock files and no extra process. The row is
-written in WAL mode, so both the database and its `-wal` file are watched. When the database is not
-there, the bar falls back to the session of your latest prompt and then to the last measured
-session. Point `OPENCODE_LATENCY_DESKTOP_DB` at the file if your app keeps it elsewhere.
+**Only the Linux column has run on real hardware.** The macOS and Windows paths are ordinary
+platform code with one rule that matters: when a check cannot run, the bar stays instead of
+disappearing. Run the selftest on your machine and you will know in ten seconds.
 
-### Platform support, honestly
+## Does it work here? Ask the plugin
 
-| Part | Linux | macOS | Windows |
-|---|---|---|---|
-| Measurement core (Node) | code path exercised by the test suite | same code, no OS calls | same code, no OS calls |
-| Bar window | **verified here**: GNOME/Mutter on X11 — managed `toolbar` window, undecorated, `_NET_WM_STATE_ABOVE`, drag, minimize, saved position | expected: Tk `overrideredirect` + `-topmost`; always-on-top is best-effort against fullscreen apps | expected: Tk `overrideredirect` + `-topmost` |
-| Open-tab tracking | **verified here**: `~/.config/ai.opencode.desktop/drafts.sqlite` | `~/Library/Application Support/ai.opencode.desktop/drafts.sqlite` (Electron convention) | `%APPDATA%\ai.opencode.desktop\drafts.sqlite` (Electron convention) |
-| Exit with the app | **verified here**: `/proc` scan | `pgrep` per name | `tasklist /FI` per name |
+```bash
+npx opencode-vitals selftest     # or: python3 selftest.py
+```
 
-Only the Linux column was run on real hardware. The macOS and Windows paths are ordinary platform
-code with the same fail-open rule — when a check cannot run, the bar stays instead of disappearing —
-and the decision logic is covered by the test suite with a fake process list, but no macOS or
-Windows machine has run it yet. If the app keeps its database elsewhere, set
-`OPENCODE_LATENCY_DESKTOP_DB`; the bar then falls back to the session of your latest prompt.
+```
+opencode-vitals selftest — Linux 7.0.0-34-generic (linux)
+python 3.12.3 at /usr/bin/python3
 
-### Bar lifetime
+ok   tkinter available
+ok   Tk runtime present — Tk 8.6, Tcl 8.6
+ok   a window system is reachable — DISPLAY=:0
+ok   a preferred font exists — Ubuntu
+ok   topmost window accepted — type=toolbar, topmost=1
+ok   window transparency accepted — -alpha 0.96
+ok   undecorated window type chosen — toolbar
+ok   Desktop state database found — /home/fic/.config/ai.opencode.desktop/drafts.sqlite
+ok   open tab read from the database — ses_f360891d2ffeh6CxFC6Vq3a8zG
+ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
+ok   session totals readable — 2 session(s)
+ok   a bar instance is running — pid 77600
+ok   plugin version recorded — running 0.9.1, package 0.9.1, previous 0.8.0
 
-The bar belongs to the OpenCode app: it stays while the app is running and leaves within a few
-seconds after you quit it. The plugin service is supervised by `systemd` and outlives the app, and
-OpenCode publishes no event for a client disconnect, so liveness is read from the OS process list
-(`/proc` on Linux, `pgrep` on macOS, `tasklist` on Windows) when the service reports
-`OPENCODE_CLIENT=desktop`. A check that cannot run keeps the bar instead of hiding it, and a service
-that was not started by the Desktop app simply follows the service process.
+13/13 checks passed
+```
+
+Every line is a measured fact, not an assumption. A report from another operating system is worth
+sending with a bug.
 
 ## Options
 
-The default history limit is 20 measurements. To configure the plugin, move the package outside the
-auto-discovered directory and add it explicitly to `opencode.json(c)`:
+| Option | Default | What it does |
+| --- | --- | --- |
+| `popup` | `true` | Show the bar. `false` keeps measuring with no window. |
+| `historyLimit` | `20` | Measurements kept in storage, 1–100. |
+| `log` | `true` | Log one line per measurement through OpenCode's logger. |
+| `enabled` | `true` | Master switch. |
 
 ```json
 {
   "plugins": [
     {
-      "package": "./opencode-vitals",
-      "options": {
-        "historyLimit": 50,
-        "log": true,
-        "popup": true,
-        "enabled": true
-      }
+      "package": "opencode-vitals",
+      "options": { "historyLimit": 50, "log": true, "popup": true, "enabled": true }
     }
   ]
 }
 ```
 
-`historyLimit` is bounded to 1–100. Set `popup: false` to run measurements without the bar. When no
-provider token counts exist, `tok/s` shows `–` instead of inventing a number; the measurement is
-limited by the provider's visible stream.
-
-For a manual bar launch, run `./start-bar.sh`. Set `OPENCODE_LATENCY_POSITION` to `top-right`,
-`top-left`, `bottom-right`, or `bottom-left` to choose the default corner (a dragged position wins),
-and `OPENCODE_LATENCY_PYTHON` to point at a specific Python interpreter.
-
-To keep working on the source while OpenCode auto-discovers it, link the checkout into the plugins
-directory:
-
-```bash
-ln -s "$PWD" ~/.config/opencode/plugins/opencode-vitals
-```
-
-If OpenCode already discovered this plugin under a different folder name, keep the link under that
-name: the running instance holds the path it was loaded from, and renaming the link leaves it
-pointing at nothing until OpenCode reloads it.
-
-The bar replaces its running revision within five seconds of an edit, so there is no restart step.
+Environment variables, for the curious: `OPENCODE_LATENCY_PYTHON` (interpreter),
+`OPENCODE_LATENCY_POSITION` (`top-right`, `top-left`, `bottom-right`, `bottom-left`),
+`OPENCODE_LATENCY_DESKTOP_DB` (where the app keeps its state database).
 
 ## Privacy
 
-The plugin reads OpenCode's own event stream and writes small JSON status files under the system
-temporary directory. It never reads prompts or responses from disk and makes no network requests.
-The one exception is the open-tab lookup described above: it reads a single row (`tabs.recent`) from
-the Desktop app's own state database, read-only, to know which tab you are looking at. No draft
-text is read.
+This plugin has no network code at all. No registry calls, no analytics, no telemetry, no update
+pings. It reads OpenCode's own event stream and writes a handful of small JSON files under your
+system temporary directory.
+
+- **Prompts and responses are never stored.** Only counts, timings, model and agent names, and
+  session/message identifiers.
+- **One deliberate exception, and you can switch it off by moving the file:** to know which tab you
+  are looking at, the bar reads a single row (`tabs.recent`) from the Desktop app's own state
+  database, opened **read-only**. No draft text is read. Point `OPENCODE_LATENCY_DESKTOP_DB`
+  somewhere else, or let the file disappear, and the bar falls back to "the session you last typed
+  in".
+- **Nothing survives a restart except the numbers.** The status directory is plain files in
+  `/tmp`-style temporary storage, and stale response markers are swept on a timer rather than
+  waiting for your next message.
 
 ## Updates
 
-OpenCode resolves `opencode-vitals` from npm on its own schedule, into
-`~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. The plugin does not call the npm
-registry: it has no network code at all. Instead, every time the module is evaluated it reads its
-own `package.json` version and compares it with the version it recorded last time in
-`<tmp>/opencode-latency-monitor/plugin-version.json`. When they differ it is an update, and:
+The plugin never installs itself, and it never phones home. OpenCode owns the package lifecycle:
+it resolves `opencode-vitals` from npm and caches it (on this machine,
+`~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`). OpenCode also has its own update
+setting — `"update": "notify" | "auto" | "disable"` — and documents that an automatic install does
+**not** restart a running server, so a restart is what activates a new copy.
 
-- the bar shows `0.9.1 installed` in place of the metrics for eight seconds, once — even if the
-  update landed while OpenCode was closed, because the notice is tied to the recorded version rather
-  than to a countdown from the install moment;
-- the plugin log line reads `updated 0.9.0 -> 0.9.1`;
-- `npm run selftest` prints the running version, the previous one, and whether they match.
+The plugin's only job is to notice when it has been handed one:
 
-To see whether a *newer* version exists before OpenCode fetches it, ask npm directly:
+- the bar shows `0.9.1 installed` for eight seconds, exactly once — even if the update landed while
+  OpenCode was closed;
+- the plugin log reads `updated 0.9.0 -> 0.9.1`;
+- `selftest` prints the running version and the previous one.
+
+To see whether something newer exists before OpenCode fetches it:
 
 ```bash
-npm view opencode-vitals version     # latest published
-cat "$(ls -d ~/.cache/opencode/npm/opencode-vitals@latest/* 2>/dev/null | tail -1)/node_modules/opencode-vitals/package.json" | grep version
+npm view opencode-vitals version
 ```
 
 ## Development
 
 ```bash
-npm test        # plugin logic (Node) and bar behaviour (Tkinter)
-npm run selftest  # does the bar work on *this* machine?
-npm pack        # build the publishable tarball
+npm test           # 91 plugin checks + 42 bar checks
+npm run selftest   # does the bar work on this machine?
+npm pack           # build the publishable tarball
+npm run prepublishOnly   # what publish runs first
 ```
 
-`npm test` needs a window system for the bar suite; on a headless Linux box it prints `skipped`
-instead of failing. `npm run selftest` is the one to run first on a new machine: it reports Tkinter,
-the window type that stays undecorated and on top, the Desktop database path, and the tab it reads.
-Its output is a list of measured facts, so a report from another operating system is worth sending
-with a bug.
+```
+opencode-vitals/
+├── index.js            the plugin: events, accounting, storage
+├── bar.py              the bar: Tkinter, standard library only
+├── selftest.py         per-machine diagnosis
+├── start-bar.sh        run the bar by hand
+└── tests/
+    ├── vitals.test.mjs plugin logic
+    └── bar.test.py     bar behaviour, lock, Desktop tab tracking
+```
 
-Run the bar by hand with `./start-bar.sh` while developing.
+The test suite includes the mistakes worth catching twice: zombie holders in the singleton lock,
+a session with no totals yet, a WAL write that leaves the database timestamp untouched, and process
+checks on macOS and Windows driven by a fake process list so their logic is verified even though
+their hardware was not.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -13,6 +13,8 @@
     "bar.py",
     "start-bar.sh",
     "selftest.py",
+    "docs/bar.png",
+    "docs/bar-mini.png",
     "README.md",
     "LICENSE"
   ],

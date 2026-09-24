@@ -658,7 +658,13 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const shellBlocks = [...readme.matchAll(/```(?:bash|sh|shell)\n([\s\S]*?)```/g)].map((match) => match[1])
   const forbidden = shellBlocks.filter((block) => /npm\s+(install|i)\b[^\n]*opencode-vitals/.test(block))
   check("no command block tells users to npm install the plugin", forbidden.length === 0, JSON.stringify(forbidden))
-  check("README links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
+  // An update guide that forgets how to verify the running version, or how to
+  // update the other two install methods, is the gap that got reported.
+  const updating = readme.slice(readme.indexOf("## Updating"))
+  check("updating covers the git install", /git pull/.test(updating))
+  check("updating covers the copied install", /Replace the files/.test(updating))
+  check("updating tells users how to verify", /opencode-vitals-selftest/.test(updating) && /running 0\.9\.1/.test(updating))
+  check("updating links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
   for (const image of [...readme.matchAll(/src="([^"]+\.png)"/g)].map((match) => match[1])) {
     check(`README image ${image} exists`, existsSync(new URL(`../${image}`, import.meta.url)))
   }

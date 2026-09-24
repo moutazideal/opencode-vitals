@@ -75,6 +75,8 @@ OpenCode Vitals puts that number on your screen, in the corner, all session long
 - **It follows your tab.** Switch sessions in the Desktop app and the bar switches with it.
 - **It leaves when you do.** Close OpenCode and the bar goes with it; nothing is left on screen.
 - **It tells you when it updated.** A new version announces itself once, in place of the numbers.
+- **You can check what is running.** `npx opencode-vitals-selftest` prints the loaded version, the
+  previous one, and every fact the bar depends on.
 
 <p align="center">
   <img src="docs/bar-mini.png" width="120" alt="The collapsed bar: a small square showing the session tokens per second under a TOK/S caption">
@@ -256,26 +258,55 @@ system temporary directory.
   `/tmp`-style temporary storage, and stale response markers are swept on a timer rather than
   waiting for your next message.
 
-## Updates
+## Updating
 
-The plugin never installs itself, and it never phones home. OpenCode owns the package lifecycle:
-it resolves `opencode-vitals` from npm and caches it (on this machine,
-`~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`). OpenCode also has its own update
-setting — `"update": "notify" | "auto" | "disable"` — and documents that an automatic install does
-**not** restart a running server, so a restart is what activates a new copy.
+How you update depends on how you installed it.
 
-The plugin's only job is to notice when it has been handed one:
+| How you installed it | How to update |
+| --- | --- |
+| `"plugins": ["opencode-vitals"]` | OpenCode owns the copy: it resolves the package at startup into `~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. Quit and reopen OpenCode after a new version is published, then check the version below. |
+| Copied the folder | Replace the files with the new release. The running plugin picks them up within about five seconds. |
+| `git clone` and symlinked it | `git pull`. Same five second pickup, no restart. |
+
+```bash
+npm view opencode-vitals version                              # what is published now
+ls -d ~/.cache/opencode/npm/opencode-vitals@latest/* 2>/dev/null   # what OpenCode holds
+```
+
+OpenCode has its own `update` setting — `"update": "notify" | "auto" | "disable"`, defaulting to
+`notify` — and its documentation states that an automatic install does **not** restart a running
+server, so something has to restart for a new copy to take effect. Whether that setting also covers
+plugins is not something this project has verified.
+
+### Check what is actually running
+
+Do not assume an update landed. The selftest prints the loaded version, and the bar says so out loud:
+
+```bash
+npx opencode-vitals-selftest
+```
+
+```
+ok   plugin version recorded — running 0.9.1, package 0.9.1, previous 0.8.0
+```
+
+If it still reports the old version, OpenCode reused its cached snapshot. That is the normal case
+after a plain restart: each package keeps a single `<timestamp>` directory in the cache, and on this
+machine several application restarts produced no second snapshot, so a restart alone is not proof of
+a refresh. Quit OpenCode, and if the version still has not moved, stop the leftover sidecar process
+— the `opencode-cli serve --service` process — and launch OpenCode again, then run the selftest once
+more. On Linux that service is supervised by systemd and can outlive the app window, which is why
+reopening the window is not always enough.
+
+### How the plugin announces a new copy
+
+When the module is evaluated it compares its own `package.json` version with the one it recorded in
+`plugin-version.json`, with no network call involved:
 
 - the bar shows `0.9.1 installed` for eight seconds, exactly once — even if the update landed while
   OpenCode was closed;
 - the plugin log reads `updated 0.9.0 -> 0.9.1`;
-- `selftest` prints the running version and the previous one.
-
-To see whether something newer exists before OpenCode fetches it:
-
-```bash
-npm view opencode-vitals version
-```
+- the selftest prints `running <new>, package <new>, previous <old>`.
 
 ## Development
 

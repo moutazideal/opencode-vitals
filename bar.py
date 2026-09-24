@@ -33,6 +33,8 @@ DEFAULT_TOTALS_FILE = Path(tempfile.gettempdir()) / "opencode-latency-monitor" /
 DEFAULT_BEST_TOTALS_FILE = Path(tempfile.gettempdir()) / "opencode-latency-monitor" / "bar-session-totals.json"
 DEFAULT_POSITION_FILE = Path(tempfile.gettempdir()) / "opencode-latency-monitor" / "popup-position.json"
 DEFAULT_LOCK_FILE = Path(tempfile.gettempdir()) / "opencode-latency-monitor" / "popup.lock"
+DEFAULT_VERSION_FILE = Path(tempfile.gettempdir()) / "opencode-latency-monitor" / "plugin-version.json"
+UPDATE_BADGE_MS = 8000
 NORMAL_WIDTH = 360
 NORMAL_HEIGHT = 54
 MINI_WIDTH = 62
@@ -174,6 +176,17 @@ def load_current_session(path: Path) -> dict[str, Any] | None:
             return None
     session_id = record.get("sessionID")
     return {"sessionID": session_id} if isinstance(session_id, str) and session_id else None
+
+
+def write_json_atomic(path: Path, value: Any) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(value), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except OSError:
+        pass
 
 
 def load_saved_position(path: Path) -> tuple[int, int] | None:
@@ -360,14 +373,18 @@ class Bar:
         position_file: Path,
         parent_pid: int = 0,
         desktop_database: Path | None = None,
+        version_file: Path | None = None,
     ) -> None:
         self.status_file = status_file
         self.current_session_file = current_session_file
         self.totals_file = totals_file
         self.best_totals_file = best_totals_file
         self.position_file = position_file
+        self.version_file = version_file or DEFAULT_VERSION_FILE
         self.parent_pid = parent_pid
         self.desktop_tabs = DesktopTabs(desktop_database)
+        self.notice_shown: tuple[str, int] | None = None
+        self.notice_started_at = 0.0
         self.stopping = False
         self.minimized = False
         self.poll_count = 0
@@ -509,18 +526,25 @@ class Bar:
         turns = format_count(totals.get("turns"))
         steps = format_count(totals.get("steps"))
         rate = totals_rate(totals)
-        key = (session_id or "", turns, steps, rate)
+        notice = self.active_update_notice()
+        key = (session_id or "", turns, steps, rate, notice[0] if notice else None)
         if not force and key == self.render_key:
             return
         self.render_key = key
         self.canvas.delete("all")
         if self.minimized:
             self.draw_card(2, 2, self.width - 2, self.height - 2, 14)
-            self.draw_text(self.width / 2, 18, "TOK/S", self.font_mini_caption, DIM_COLOR, anchor="center")
-            self.draw_text(self.width / 2, 40, format_tps(rate), self.font_mini_value, ACCENT_COLOR, anchor="center")
+            caption = "TOK/S" if notice is None else "UPDATED"
+            self.draw_text(self.width / 2, 18, caption, self.font_mini_caption, DIM_COLOR, anchor="center")
+            self.draw_text(self.width / 2, 40, format_tps(rate) if notice is None else notice[0], self.font_mini_value, ACCENT_COLOR, anchor="center")
             return
         self.draw_card(2, 2, self.width - 2, self.height - 2, 13)
         self.draw_text(self.width - 16, self.height / 2, "×", self.font_close, MUTED_COLOR, anchor="center")
+        center_y = self.height / 2
+        if notice is not None:
+            text = f"{notice[0]} installed"
+            self.draw_centered(text, center_y, ACCENT_COLOR)
+            return
         turns_text = "1 turn" if turns == 1 else f"{turns} turns"
         steps_text = "1 step" if steps == 1 else f"{steps} steps"
         tps_text = f"{format_tps(rate)} tok/s"
@@ -534,7 +558,6 @@ class Bar:
             + self.font_text.measure(tps_text)
         )
         start_x = max(14, (self.width - total_width) / 2)
-        center_y = self.height / 2
         self.draw_gauge(start_x + icon_width / 2, center_y, turns > 0)
         cursor = start_x + icon_width + gap
         self.draw_text(cursor, center_y, turns_text, self.font_text, TEXT_COLOR)
@@ -544,6 +567,39 @@ class Bar:
         self.draw_text(cursor, center_y, "·", self.font_text, DIM_COLOR)
         cursor += self.font_text.measure("·") + gap
         self.draw_text(cursor, center_y, tps_text, self.font_text, TEXT_COLOR)
+
+    def draw_centered(self, text: str, center_y: float, fill: str) -> None:
+        width = self.font_text.measure(text)
+        self.draw_text(max(14, (self.width - width) / 2), center_y, text, self.font_text, fill)
+
+    def active_update_notice(self) -> tuple[str, int] | None:
+        """Show a newly installed version once, for a few seconds, then the metrics.
+
+        The notice is tied to the version file rather than to a countdown from the
+        install moment, so an update that lands while OpenCode is closed is still
+        announced the next time the bar runs.
+        """
+        now_ms = time.time() * 1000
+        if self.notice_shown and now_ms - self.notice_started_at < UPDATE_BADGE_MS:
+            return self.notice_shown
+        self.notice_shown = None
+        record = load_record(self.version_file)
+        if record is None:
+            return None
+        version = record.get("version")
+        updated_at = record.get("updatedAt")
+        seen_at = record.get("seenAt")
+        if not isinstance(version, str) or not version:
+            return None
+        if not isinstance(updated_at, (int, float)) or isinstance(updated_at, bool):
+            return None
+        if isinstance(seen_at, (int, float)) and not isinstance(seen_at, bool) and seen_at >= updated_at:
+            return None
+        record["seenAt"] = now_ms
+        write_json_atomic(self.version_file, record)
+        self.notice_shown = (version, updated_at)
+        self.notice_started_at = now_ms
+        return self.notice_shown
 
     # -- interaction -------------------------------------------------------------
     def on_press(self, event: tk.Event) -> None:
@@ -674,6 +730,7 @@ def main() -> int:
     best_totals_file = Path(os.environ.get("OPENCODE_LATENCY_BEST_TOTALS_FILE", str(DEFAULT_BEST_TOTALS_FILE)))
     position_file = Path(os.environ.get("OPENCODE_LATENCY_POSITION_FILE", str(DEFAULT_POSITION_FILE)))
     lock_file = Path(os.environ.get("OPENCODE_LATENCY_LOCK_FILE", str(DEFAULT_LOCK_FILE)))
+    version_file = Path(os.environ.get("OPENCODE_LATENCY_VERSION_FILE", str(DEFAULT_VERSION_FILE)))
     desktop_database = os.environ.get("OPENCODE_LATENCY_DESKTOP_DB")
     parent_pid = env_int("OPENCODE_LATENCY_PARENT_PID", 0)
 
@@ -689,6 +746,7 @@ def main() -> int:
             position_file,
             parent_pid,
             Path(desktop_database) if desktop_database else None,
+            version_file,
         )
         try:
             return bar.run()

@@ -141,6 +141,27 @@ The one exception is the open-tab lookup described above: it reads a single row 
 the Desktop app's own state database, read-only, to know which tab you are looking at. No draft
 text is read.
 
+## Updates
+
+OpenCode resolves `opencode-vitals` from npm on its own schedule, into
+`~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. The plugin does not call the npm
+registry: it has no network code at all. Instead, every time the module is evaluated it reads its
+own `package.json` version and compares it with the version it recorded last time in
+`<tmp>/opencode-latency-monitor/plugin-version.json`. When they differ it is an update, and:
+
+- the bar shows `0.9.1 installed` in place of the metrics for eight seconds, once — even if the
+  update landed while OpenCode was closed, because the notice is tied to the recorded version rather
+  than to a countdown from the install moment;
+- the plugin log line reads `updated 0.9.0 -> 0.9.1`;
+- `npm run selftest` prints the running version, the previous one, and whether they match.
+
+To see whether a *newer* version exists before OpenCode fetches it, ask npm directly:
+
+```bash
+npm view opencode-vitals version     # latest published
+cat "$(ls -d ~/.cache/opencode/npm/opencode-vitals@latest/* 2>/dev/null | tail -1)/node_modules/opencode-vitals/package.json" | grep version
+```
+
 ## Development
 
 ```bash

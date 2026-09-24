@@ -131,6 +131,22 @@ def main() -> int:
     else:
         check("no stale bar lock", True, str(lock))
 
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    version_file = status_dir / "plugin-version.json"
+    if version_file.is_file():
+        try:
+            recorded = json.loads(version_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = {}
+        previous = recorded.get("previous")
+        check(
+            "plugin version recorded",
+            recorded.get("version") == package.get("version"),
+            f"running {recorded.get('version')}, package {package.get('version')}" + (f", previous {previous}" if previous else ""),
+        )
+    else:
+        check("plugin version recorded", False, f"no {version_file}; the plugin has not started yet")
+
     finish()
     return 0
 

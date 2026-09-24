@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin, { vitalsInternals } from "../index.js"
@@ -39,6 +39,19 @@ async function waitForRecord(storage, predicate = () => true, timeoutMs = 4000) 
     await wait(25)
   }
   throw new Error("timed out waiting for a persisted record")
+}
+
+// Assigning undefined to process.env stores the string "undefined", which would
+// silently break every later tmpdir() call, so restore by deleting instead.
+async function withTmpDir(value, run) {
+  const previous = process.env.TMPDIR
+  process.env.TMPDIR = value
+  try {
+    return await run()
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previous
+  }
 }
 
 let eventCounter = 0
@@ -514,10 +527,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
 {
   const pluginPath = new URL("../index.js", import.meta.url).href
   const sandbox = mkdtempSync(join(tmpdir(), "vitals-stop-"))
-  const previousTmp = process.env.TMPDIR
-  process.env.TMPDIR = sandbox
-  const isolated = await import(`${pluginPath}?sandbox=${Date.now()}`)
-  process.env.TMPDIR = previousTmp
+  const isolated = await withTmpDir(sandbox, () => import(`${pluginPath}?sandbox=${Date.now()}`))
   const lockDir = join(sandbox, "opencode-latency-monitor")
   mkdirSync(lockDir, { recursive: true })
   const lockFile = join(lockDir, "popup.lock")
@@ -571,6 +581,30 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     return { status: 1, stdout: "" }
   })
   check("darwin passes one pattern per call", Array.isArray(pgrepArgs) && pgrepArgs.length === 2, JSON.stringify(pgrepArgs))
+}
+
+// 20. A version change is noticed without any network call.
+{
+  const sandbox = mkdtempSync(join(tmpdir(), "vitals-version-"))
+  const isolated = await withTmpDir(sandbox, () => import(`../index.js?version=${Date.now()}`))
+  const versionFile = join(sandbox, "opencode-latency-monitor", "plugin-version.json")
+  const own = isolated.vitalsInternals.readOwnVersion()
+  check("plugin reports its own version", /^\d+\.\d+\.\d+/.test(own), own)
+
+  const first = await isolated.vitalsInternals.notePluginVersion()
+  check("first run counts as installed", first.changed === true && first.previous === null, JSON.stringify(first))
+  check("version file written", existsSync(versionFile), versionFile)
+
+  const again = await isolated.vitalsInternals.notePluginVersion()
+  check("same version is not an update", again.changed === false, JSON.stringify(again))
+
+  writeFileSync(versionFile, JSON.stringify({ version: "0.0.1-old", updatedAt: Date.now() - 86_400_000 }))
+  const upgraded = await isolated.vitalsInternals.notePluginVersion()
+  check("new version is an update", upgraded.changed === true && upgraded.previous === "0.0.1-old", JSON.stringify(upgraded))
+  const stored = JSON.parse(readFileSync(versionFile, "utf8"))
+  check("stored update keeps both versions", stored.version === own && stored.previous === "0.0.1-old", JSON.stringify(stored))
+  check("stored update is timestamped", typeof stored.updatedAt === "number" && stored.updatedAt > 0, JSON.stringify(stored.updatedAt))
+  rmSync(sandbox, { recursive: true, force: true })
 }
 
 for (const result of results) {

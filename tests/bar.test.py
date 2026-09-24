@@ -240,6 +240,29 @@ try:
     check("fallback totals shown", "3 turns" in " | ".join(texts_of(missing_db_ui)), " | ".join(texts_of(missing_db_ui)))
     missing_db_ui.shutdown()
 
+    # --- update notice ---------------------------------------------------------
+    version_file = work / "plugin-version.json"
+    version_ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "absent-drafts.sqlite", version_file)
+    version_file.write_text(json.dumps({"version": "0.9.1", "previous": "0.9.0", "updatedAt": int(time.time() * 1000) - 600_000}), encoding="utf-8")
+    version_ui.poll()
+    version_ui.root.update()
+    check("pending update is announced once", "0.9.1 installed" in " | ".join(texts_of(version_ui)), " | ".join(texts_of(version_ui)))
+    check("announced update is marked seen", json.loads(version_file.read_text(encoding="utf-8")).get("seenAt", 0) > 0)
+    version_ui.notice_started_at -= bar.UPDATE_BADGE_MS + 1
+    version_ui.poll()
+    version_ui.root.update()
+    check("notice returns to metrics", "0.9.1 installed" not in " | ".join(texts_of(version_ui)) and "turns" in " | ".join(texts_of(version_ui)), " | ".join(texts_of(version_ui)))
+    version_ui.shutdown()
+
+    # A bar that starts after the notice was already seen shows metrics only.
+    seen_file = work / "plugin-version-seen.json"
+    seen_file.write_text(json.dumps({"version": "0.9.2", "updatedAt": int(time.time() * 1000) - 3_600_000, "seenAt": int(time.time() * 1000) - 3_000_000}), encoding="utf-8")
+    seen_ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "absent-drafts.sqlite", seen_file)
+    seen_ui.poll()
+    seen_ui.root.update()
+    check("already seen update stays quiet", "0.9.2 installed" not in " | ".join(texts_of(seen_ui)), " | ".join(texts_of(seen_ui)))
+    seen_ui.shutdown()
+
     # --- no display: exits quietly -------------------------------------------
     env = {**os.environ, "DISPLAY": "", "WAYLAND_DISPLAY": ""}
     probe = subprocess.run([sys.executable, str(ROOT / "bar.py")], env=env, capture_output=True, text=True, timeout=20)

@@ -40,6 +40,7 @@ const companions = globalThis[COMPANIONS_KEY] ?? (globalThis[COMPANIONS_KEY] = {
 })
 
 const BAR_LOCK = join(STATUS_DIR, "popup.lock")
+const PLUGIN_VERSION_FILE = join(STATUS_DIR, "plugin-version.json")
 // The OpenCode service is supervised by systemd and outlives the Desktop app, so
 // the bar cannot be tied to the plugin process alone. No server event reports a
 // client disconnect, so the app process itself is the signal.
@@ -263,6 +264,38 @@ async function writeJsonAtomic(path, value) {
     await unlink(temporary).catch(() => {})
     throw error
   }
+}
+
+// An update is a new module evaluation, so the plugin can notice the change by
+// reading its own version: no registry call, no network, nothing to trust.
+function readOwnVersion() {
+  try {
+    const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8")
+    const value = JSON.parse(raw)
+    return typeof value?.version === "string" && value.version ? value.version : "unknown"
+  } catch {
+    return "unknown"
+  }
+}
+
+async function notePluginVersion() {
+  const version = readOwnVersion()
+  let previous = null
+  try {
+    previous = JSON.parse(await readFile(PLUGIN_VERSION_FILE, "utf8"))
+  } catch {
+    previous = null
+  }
+  const known = typeof previous?.version === "string" ? previous.version : null
+  if (known === version) return { version, changed: false, previous: null }
+  const payload = {
+    version,
+    previous: known,
+    updatedAt: now(),
+    path: dirname(fileURLToPath(import.meta.url)),
+  }
+  await writeJsonAtomic(PLUGIN_VERSION_FILE, payload).catch(() => {})
+  return { version, changed: true, previous: known }
 }
 
 async function publishStatus(record) {
@@ -1185,6 +1218,8 @@ export const vitalsInternals = {
   processListDecision,
   barExpectedFrom,
   stopPopup,
+  readOwnVersion,
+  notePluginVersion,
 }
 
 export default {
@@ -1220,7 +1255,8 @@ export default {
     }
     state.setStorage(ctx.storage)
     await state.load()
-    state.log(ctx, "loaded")
+    const version = await notePluginVersion()
+    state.log(ctx, version.changed ? `updated ${version.previous ?? "none"} -> ${version.version}` : `loaded ${version.version}`)
 
     if (!ctx.event?.subscribe) {
       state.log(ctx, "event subscription unavailable; latency monitoring is disabled")

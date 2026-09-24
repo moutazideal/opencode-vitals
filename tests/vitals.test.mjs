@@ -3,7 +3,15 @@ import { spawn } from "node:child_process"
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import plugin, { vitalsInternals } from "../index.js"
+
+// The plugin resolves its status directory from the temporary directory when the
+// module is evaluated, so the whole suite gets a sandbox before the import.
+// Without this, running the tests drops response markers into the real
+// ~/.cache or /tmp status directory of the person running them.
+const SUITE_TMP = mkdtempSync(join(tmpdir(), "vitals-suite-"))
+process.env.TMPDIR = SUITE_TMP
+const { default: plugin, vitalsInternals } = await import("../index.js")
+process.on("exit", () => rmSync(SUITE_TMP, { recursive: true, force: true }))
 
 const results = []
 function check(name, condition, detail = "") {

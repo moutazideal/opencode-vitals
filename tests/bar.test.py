@@ -135,7 +135,7 @@ try:
     current_file.write_text(json.dumps({"available": True, "sessionID": session_id, "observedAt": int(time.time() * 1000)}), encoding="utf-8")
     totals_file.write_text(json.dumps({"version": 1, "sessions": {session_id: {"turns": 12, "steps": 260, "generatedTokens": 200000, "activeStreamMs": 500000}}}), encoding="utf-8")
 
-    ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "absent-drafts.sqlite")
+    ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "absent-drafts.sqlite", work / "ui-version.json")
     ui.poll()
     ui.root.update()
 
@@ -161,7 +161,7 @@ try:
     # the last measured response is the honest thing to show.
     empty_totals = work / "empty-totals.json"
     empty_totals.write_text(json.dumps({"version": 1, "sessions": {}}), encoding="utf-8")
-    fallback_ui = bar.Bar(status, current_file, empty_totals, work / "fresh-best.json", position, 0, work / "absent-drafts.sqlite")
+    fallback_ui = bar.Bar(status, current_file, empty_totals, work / "fresh-best.json", position, 0, work / "absent-drafts.sqlite", work / "fallback-version.json")
     fallback_ui.poll()
     fallback_ui.root.update()
     check("session without totals shows the last measurement", shows(fallback_ui, "10", "turns") and shows(fallback_ui, "274", "tok/s"), " | ".join(texts_of(fallback_ui)))
@@ -238,7 +238,7 @@ try:
     }}), encoding="utf-8")
     write_tabs(desktop_session)
 
-    tabs_ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, desktop_db)
+    tabs_ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, desktop_db, work / "tabs-version.json")
     tabs_ui.poll()
     tabs_ui.root.update()
     check("desktop tab wins over events", tabs_ui.current_session_id == desktop_session, tabs_ui.current_session_id)
@@ -257,7 +257,7 @@ try:
 
     # No database: the bar falls back to the plugin's event session.
     tabs_ui.shutdown()
-    missing_db_ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "missing.sqlite")
+    missing_db_ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "missing.sqlite", work / "missing-version.json")
     missing_db_ui.poll()
     missing_db_ui.root.update()
     check("missing database falls back to events", missing_db_ui.current_session_id == event_session, missing_db_ui.current_session_id)

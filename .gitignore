@@ -1,9 +1,53 @@
+# Dependencies
 node_modules/
+.venv/
+venv/
 __pycache__/
-*.pyc
-*.tgz
-.DS_Store
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# The global gitignore blocks *.png in every repository; these two are the
-# README screenshots, small and intentional.
-!docs/*.png
+# Build and packaging output
+*.tgz
+dist/
+build/
+*.egg-info/
+
+# Test and coverage output
+coverage/
+.nyc_output/
+*.log
+
+# Local secrets and machine settings
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Editor swap and backup files
+*.swp
+*.swo
+*.bak
+*.orig
+*~
+
+# Images are documentation here, not junk: screenshots of the bar belong in the
+# repository and in the npm package. The leading negations matter because a
+# machine-wide ignore at ~/.config/git/ignore blocks images in every repository,
+# and these lines make sure that does not apply to this one.
+!*.png
+!*.jpg
+!*.jpeg
+!*.gif
+!*.webp
+!*.svg
+
+# The only images that are not wanted are the intermediate captures written while
+# a screenshot is being taken, and scratch files from a debugging session.
+*-raw.png
+debug*.png
+scratch*

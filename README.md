@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/bar.png" width="440" alt="The OpenCode Vitals bar: a dark always-on-top card reading 19 turns 65 steps · 291 tok/s, with a gauge on the left and a close button on the right">
+  <img src="docs/bar.png" width="440" alt="The OpenCode Vitals bar: a dark always-on-top card with a teal speedometer dial on the left, the readings 20 turns, 66 steps and 282 tok/s in the middle, and a circular close button on the right">
   <h1>OpenCode Vitals</h1>
   <p><strong>Stop guessing how fast your model is. Watch it.</strong></p>
   <p>A tiny always-on-top bar for OpenCode V2 that shows one honest line for the session you are
@@ -29,12 +29,16 @@ OpenCode Vitals puts that number on your screen, in the corner, all session long
 ## What you get
 
 ```
-◔ 19 turns 65 steps · 291 tok/s
+◔  19 turns   65 steps   282 tok/s
 ```
 
 - **Always on top, never in the way.** 360×54 pixels, undecorated, no taskbar entry, no focus
-  steal. Drag it anywhere; the position is remembered. Click `×` and it collapses to a small square
-  that keeps showing tok/s; click the square to bring it back.
+  steal. Drag it anywhere; the position is remembered. Click the close button and it collapses to a
+  small square that keeps showing tok/s; click the square to bring it back.
+- **A dial, not a dot.** The gauge is a real speedometer: a 270° track, five ticks, a needle on the
+  session's tok/s, and a soft teal glow that only appears when there is a measurement. Numbers are
+  drawn bright with their units dimmed, and tok/s carries the accent colour, so the eye lands on the
+  number you actually came for.
 - **Session-wide, not last-message.** The three numbers aggregate the whole session you are looking
   at, so a single fast reply cannot flatter a slow session.
 - **It follows your tab.** Switch sessions in the Desktop app and the bar switches with it.
@@ -242,7 +246,7 @@ npm view opencode-vitals version
 ## Development
 
 ```bash
-npm test           # 91 plugin checks + 42 bar checks
+npm test           # 91 plugin checks + 44 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first
@@ -259,10 +263,11 @@ opencode-vitals/
     └── bar.test.py     bar behaviour, lock, Desktop tab tracking
 ```
 
-The test suite includes the mistakes worth catching twice: zombie holders in the singleton lock,
-a session with no totals yet, a WAL write that leaves the database timestamp untouched, and process
-checks on macOS and Windows driven by a fake process list so their logic is verified even though
-their hardware was not.
+The test suite includes the mistakes worth catching twice: zombie holders in the singleton lock, a
+session with no totals yet (which must fall back to the last measurement instead of claiming zero
+work), a WAL write that leaves the database timestamp untouched, and process checks on macOS and
+Windows driven by a fake process list so their logic is verified even though their hardware was
+not.
 
 ## License
 

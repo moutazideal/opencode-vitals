@@ -8,6 +8,7 @@ and Windows without GTK, gi, sqlite, or any other package.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
@@ -47,12 +48,24 @@ LOCK_DELAY_SECONDS = 0.2
 DRAG_THRESHOLD = 3
 TOTAL_FIELDS = ("turns", "steps", "outputTokens", "reasoningTokens", "generatedTokens", "activeStreamMs")
 WINDOW_BG = "#0b0e15"
-CARD_BG = "#171c28"
-CARD_BORDER = "#2a3345"
-TEXT_COLOR = "#e2e8f0"
+CARD_BG = "#161b28"
+CARD_BORDER = "#28324a"
+CARD_HIGHLIGHT = "#2b3550"
+TEXT_COLOR = "#f1f5f9"
 MUTED_COLOR = "#8b95a7"
 DIM_COLOR = "#5b6678"
 ACCENT_COLOR = "#2dd4bf"
+GAUGE_TRACK = "#2a3346"
+GAUGE_TICK = "#3b465c"
+GAUGE_NEEDLE = "#d7e0ee"
+# Tk angles: 0 is 3 o'clock and they grow counterclockwise, so a dial with its gap
+# at the bottom starts at 225 (lower left) and sweeps -270 through the top.
+GAUGE_START_DEGREES = 225.0
+GAUGE_SWEEP_DEGREES = 270.0
+# INVENTED: the dial needs a full scale to point at. This number is a visual
+# reference for the arc only and is never shown; the printed tok/s is the
+# measurement and comes from the session totals.
+GAUGE_FULL_SCALE_TPS = 500.0
 FONT_CANDIDATES = ("Ubuntu", "Segoe UI", "SF Pro Text", "Noto Sans", "DejaVu Sans", "Helvetica")
 SESSION_ID_PATTERN = re.compile(r"ses_[A-Za-z0-9]+")
 DESKTOP_STATE_KEY = "tabs.recent"
@@ -148,6 +161,18 @@ class DesktopTabs:
         self.state_key = state_key
         self.session = read_desktop_session(path)
         return self.session
+
+
+def lerp_color(start: str, end: str, amount: float) -> str:
+    """Blend two #rrggbb colours; Tk items have no alpha, so glows are faked."""
+    ratio = max(0.0, min(1.0, amount))
+
+    def channel(offset: int) -> int:
+        first = int(start[1 + offset : 3 + offset], 16)
+        second = int(end[1 + offset : 3 + offset], 16)
+        return round(first + (second - first) * ratio)
+
+    return f"#{channel(0):02x}{channel(2):02x}{channel(4):02x}"
 
 
 def env_int(name: str, fallback: int) -> int:
@@ -434,10 +459,11 @@ class Bar:
         self.root.configure(bg=WINDOW_BG)
 
         family = self.pick_font(self.root)
-        self.font_text = tkfont.Font(family=family, size=11, weight="bold")
-        self.font_close = tkfont.Font(family=family, size=12, weight="bold")
+        self.font_value = tkfont.Font(family=family, size=12, weight="bold")
+        self.font_unit = tkfont.Font(family=family, size=9)
         self.font_mini_caption = tkfont.Font(family=family, size=7, weight="bold")
-        self.font_mini_value = tkfont.Font(family=family, size=13, weight="bold")
+        self.font_mini_value = tkfont.Font(family=family, size=14, weight="bold")
+        self.close_hover = False
 
         self.width = NORMAL_WIDTH
         self.height = NORMAL_HEIGHT
@@ -463,6 +489,19 @@ class Bar:
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_motion)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Motion>", self.on_hover)
+        self.canvas.bind("<Leave>", self.on_hover_leave)
+
+    def on_hover(self, event: tk.Event) -> None:
+        hovering = (not self.minimized) and event.x >= self.width - 34
+        if hovering != self.close_hover:
+            self.close_hover = hovering
+            self.render_totals(force=True)
+
+    def on_hover_leave(self, _event: tk.Event) -> None:
+        if self.close_hover:
+            self.close_hover = False
+            self.render_totals(force=True)
 
     def apply_geometry(self) -> None:
         self.canvas.configure(width=self.width, height=self.height)
@@ -501,18 +540,91 @@ class Bar:
             x2 - radius, y2, mid_x, y2, x1 + radius, y2, x1, y2,
             x1, y2 - radius, x1, mid_y, x1, y1 + radius, x1, y1,
         ]
-        self.canvas.create_polygon(points, smooth=True, splinesteps=16, fill=CARD_BG, outline=CARD_BORDER, width=1)
+        self.canvas.create_polygon(points, smooth=True, splinesteps=24, fill=CARD_BG, outline=CARD_BORDER, width=1)
+        # A one pixel light edge along the top reads as a lit surface and is what
+        # separates the card from whatever is behind it.
+        self.canvas.create_line(
+            x1 + radius * 0.75, y1 + 1.2, x2 - radius * 0.75, y1 + 1.2,
+            fill=CARD_HIGHLIGHT, width=1, capstyle="round",
+        )
 
-    def draw_gauge(self, center_x: float, center_y: float, active: bool) -> None:
-        radius = 8.0
-        ring = "#94a3b8" if active else MUTED_COLOR
-        needle = ACCENT_COLOR if active else MUTED_COLOR
-        self.canvas.create_oval(center_x - radius, center_y - radius, center_x + radius, center_y + radius, outline=ring, width=2)
-        self.canvas.create_line(center_x, center_y, center_x + radius * 0.6, center_y - radius * 0.6, fill=needle, width=2)
-        self.canvas.create_oval(center_x - 1.6, center_y - 1.6, center_x + 1.6, center_y + 1.6, fill=needle, outline=needle)
+    def gauge_point(self, center_x: float, center_y: float, radius: float, fraction: float) -> tuple[float, float]:
+        angle = math.radians(GAUGE_START_DEGREES - GAUGE_SWEEP_DEGREES * max(0.0, min(1.0, fraction)))
+        return center_x + radius * math.cos(angle), center_y - radius * math.sin(angle)
+
+    def draw_gauge(self, center_x: float, center_y: float, rate: float | None) -> None:
+        radius = 9.0
+        fraction = 0.0 if not rate else max(0.0, min(1.0, rate / GAUGE_FULL_SCALE_TPS))
+        box = (center_x - radius, center_y - radius, center_x + radius, center_y + radius)
+
+        if rate:
+            # Tk has no per item alpha, so the glow is a few rings that step a
+            # little closer to the accent colour towards the dial. More than
+            # three reads as concentric rings rather than a glow.
+            for step in range(3, 0, -1):
+                halo = lerp_color(CARD_BG, ACCENT_COLOR, 0.035 + 0.02 * (3 - step))
+                halo_radius = radius + 2.1 * step
+                self.canvas.create_oval(
+                    center_x - halo_radius, center_y - halo_radius,
+                    center_x + halo_radius, center_y + halo_radius,
+                    outline=halo, width=1,
+                )
+
+        self.canvas.create_arc(*box, start=GAUGE_START_DEGREES, extent=-GAUGE_SWEEP_DEGREES, style="arc", outline=GAUGE_TRACK, width=3)
+        for tick in (0.0, 0.25, 0.5, 0.75, 1.0):
+            tick_x, tick_y = self.gauge_point(center_x, center_y, radius + 3.6, tick)
+            self.canvas.create_oval(tick_x - 0.7, tick_y - 0.7, tick_x + 0.7, tick_y + 0.7, fill=GAUGE_TICK, outline=GAUGE_TICK)
+
+        if rate:
+            self.canvas.create_arc(*box, start=GAUGE_START_DEGREES, extent=-GAUGE_SWEEP_DEGREES * fraction, style="arc", outline=ACCENT_COLOR, width=3)
+            for end in (0.0, fraction):
+                cap_x, cap_y = self.gauge_point(center_x, center_y, radius, end)
+                self.canvas.create_oval(cap_x - 1.5, cap_y - 1.5, cap_x + 1.5, cap_y + 1.5, fill=ACCENT_COLOR, outline=ACCENT_COLOR)
+            needle_x, needle_y = self.gauge_point(center_x, center_y, radius - 2.0, fraction)
+            self.canvas.create_line(center_x, center_y, needle_x, needle_y, fill=GAUGE_NEEDLE, width=1.4, capstyle="round")
+
+        self.canvas.create_oval(center_x - 2.8, center_y - 2.8, center_x + 2.8, center_y + 2.8, fill=CARD_BG, outline=CARD_BORDER)
+        hub = ACCENT_COLOR if rate else GAUGE_TICK
+        self.canvas.create_oval(center_x - 1.2, center_y - 1.2, center_x + 1.2, center_y + 1.2, fill=hub, outline="")
 
     def draw_text(self, x: float, y: float, text: str, font: tkfont.Font, fill: str, anchor: str = "w") -> None:
         self.canvas.create_text(x, y, text=text, font=font, fill=fill, anchor=anchor)
+
+    def segments_width(self, segments: list[tuple[str, tkfont.Font, str, int]]) -> float:
+        return sum(font.measure(text) + gap for text, font, _color, gap in segments)
+
+    def draw_segments(self, x: float, y: float, segments: list[tuple[str, tkfont.Font, str, int]]) -> float:
+        cursor = x
+        for text, font, color, gap in segments:
+            self.draw_text(cursor, y, text, font, color)
+            cursor += font.measure(text) + gap
+        return cursor
+
+    def draw_close_button(self) -> None:
+        center_x = self.width - 15
+        center_y = self.height / 2
+        radius = 8.0
+        outline = ACCENT_COLOR if self.close_hover else CARD_BORDER
+        glyph = "#dbe6f5" if self.close_hover else MUTED_COLOR
+        self.canvas.create_oval(center_x - radius, center_y - radius, center_x + radius, center_y + radius, outline=outline, width=1)
+        arm = 3.4
+        self.canvas.create_line(center_x - arm, center_y - arm, center_x + arm, center_y + arm, fill=glyph, width=1.5, capstyle="round")
+        self.canvas.create_line(center_x - arm, center_y + arm, center_x + arm, center_y - arm, fill=glyph, width=1.5, capstyle="round")
+
+    def draw_update_badge(self, version: str) -> None:
+        label = f"{version} installed"
+        width = self.font_value.measure(label) + 40
+        x1 = (self.width - width) / 2
+        y1 = self.height / 2 - 12
+        x2 = x1 + width
+        y2 = y1 + 24
+        self.draw_card(x1, y1, x2, y2, 12)
+        self.canvas.create_rectangle(x1 + 1.5, y1 + 1.5, x2 - 1.5, y2 - 1.5, fill=lerp_color(CARD_BG, ACCENT_COLOR, 0.10), outline="")
+        tick_x = x1 + 15
+        tick_y = self.height / 2
+        self.canvas.create_line(tick_x - 3.6, tick_y + 0.2, tick_x - 0.9, tick_y + 3, fill=ACCENT_COLOR, width=1.6, capstyle="round")
+        self.canvas.create_line(tick_x - 0.9, tick_y + 3, tick_x + 4, tick_y - 3.4, fill=ACCENT_COLOR, width=1.6, capstyle="round")
+        self.draw_text(x1 + 26, tick_y, label, self.font_value, ACCENT_COLOR)
 
     def render_totals(self, force: bool = False) -> None:
         session_id = self.current_session_id or self.last_record_session_id
@@ -527,50 +639,43 @@ class Bar:
         steps = format_count(totals.get("steps"))
         rate = totals_rate(totals)
         notice = self.active_update_notice()
-        key = (session_id or "", turns, steps, rate, notice[0] if notice else None)
+        key = (session_id or "", turns, steps, rate, notice[0] if notice else None, self.close_hover)
         if not force and key == self.render_key:
             return
         self.render_key = key
         self.canvas.delete("all")
-        if self.minimized:
-            self.draw_card(2, 2, self.width - 2, self.height - 2, 14)
-            caption = "TOK/S" if notice is None else "UPDATED"
-            self.draw_text(self.width / 2, 18, caption, self.font_mini_caption, DIM_COLOR, anchor="center")
-            self.draw_text(self.width / 2, 40, format_tps(rate) if notice is None else notice[0], self.font_mini_value, ACCENT_COLOR, anchor="center")
-            return
-        self.draw_card(2, 2, self.width - 2, self.height - 2, 13)
-        self.draw_text(self.width - 16, self.height / 2, "×", self.font_close, MUTED_COLOR, anchor="center")
         center_y = self.height / 2
-        if notice is not None:
-            text = f"{notice[0]} installed"
-            self.draw_centered(text, center_y, ACCENT_COLOR)
-            return
-        turns_text = "1 turn" if turns == 1 else f"{turns} turns"
-        steps_text = "1 step" if steps == 1 else f"{steps} steps"
-        tps_text = f"{format_tps(rate)} tok/s"
-        gap = 8
-        icon_width = 18
-        total_width = (
-            icon_width + gap
-            + self.font_text.measure(turns_text) + gap
-            + self.font_text.measure(steps_text) + gap
-            + self.font_text.measure("·") + gap
-            + self.font_text.measure(tps_text)
-        )
-        start_x = max(14, (self.width - total_width) / 2)
-        self.draw_gauge(start_x + icon_width / 2, center_y, turns > 0)
-        cursor = start_x + icon_width + gap
-        self.draw_text(cursor, center_y, turns_text, self.font_text, TEXT_COLOR)
-        cursor += self.font_text.measure(turns_text) + gap
-        self.draw_text(cursor, center_y, steps_text, self.font_text, TEXT_COLOR)
-        cursor += self.font_text.measure(steps_text) + gap
-        self.draw_text(cursor, center_y, "·", self.font_text, DIM_COLOR)
-        cursor += self.font_text.measure("·") + gap
-        self.draw_text(cursor, center_y, tps_text, self.font_text, TEXT_COLOR)
 
-    def draw_centered(self, text: str, center_y: float, fill: str) -> None:
-        width = self.font_text.measure(text)
-        self.draw_text(max(14, (self.width - width) / 2), center_y, text, self.font_text, fill)
+        if self.minimized:
+            self.draw_card(2, 2, self.width - 3, self.height - 3, 15)
+            if notice is not None:
+                self.draw_text(self.width / 2, 20, "UPDATED", self.font_mini_caption, MUTED_COLOR, anchor="center")
+                self.draw_text(self.width / 2, 41, notice[0], self.font_mini_value, ACCENT_COLOR, anchor="center")
+                return
+            self.draw_text(self.width / 2, 21, "TOK/S", self.font_mini_caption, DIM_COLOR, anchor="center")
+            self.draw_text(self.width / 2, 43, format_tps(rate), self.font_mini_value, ACCENT_COLOR, anchor="center")
+            return
+
+        self.draw_card(2, 2, self.width - 3, self.height - 3, 14)
+        self.draw_close_button()
+        if notice is not None:
+            self.draw_update_badge(notice[0])
+            return
+
+        segments = [
+            (str(turns), self.font_value, TEXT_COLOR, 3),
+            ("turn" if turns == 1 else "turns", self.font_unit, MUTED_COLOR, 16),
+            (str(steps), self.font_value, TEXT_COLOR, 3),
+            ("step" if steps == 1 else "steps", self.font_unit, MUTED_COLOR, 22),
+            (format_tps(rate), self.font_value, ACCENT_COLOR, 3),
+            ("tok/s", self.font_unit, MUTED_COLOR, 0),
+        ]
+        gauge_width = 28.0
+        gap = 13.0
+        total_width = gauge_width + gap + self.segments_width(segments)
+        start_x = max(34, (self.width - total_width) / 2)
+        self.draw_gauge(start_x + 11, center_y, rate)
+        self.draw_segments(start_x + gauge_width + gap, center_y, segments)
 
     def active_update_notice(self) -> tuple[str, int] | None:
         """Show a newly installed version once, for a few seconds, then the metrics.

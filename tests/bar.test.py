@@ -53,6 +53,21 @@ def texts_of(bar_ui):
     return [bar_ui.canvas.itemcget(item, "text") for item in bar_ui.canvas.find_all() if bar_ui.canvas.type(item) == "text"]
 
 
+def shows(bar_ui, *parts):
+    """Every part is drawn as its own text item, in the order given.
+
+    The bar renders a number in one colour and its unit in another, so the
+    checks name both pieces instead of a single joined string.
+    """
+    texts = texts_of(bar_ui)
+    positions = []
+    for part in parts:
+        if part not in texts:
+            return False
+        positions.append(texts.index(part))
+    return positions == sorted(positions)
+
+
 bar = load_module("bar_test", ROOT / "bar.py")
 
 work = Path(tempfile.mkdtemp(prefix="vitals-bar-test-", dir="/tmp/opencode"))
@@ -128,26 +143,35 @@ try:
         return texts_of(ui)
 
     joined = " | ".join(texts())
-    check("bar shows turns", "12 turns" in joined, joined)
-    check("bar shows steps", "260 steps" in joined, joined)
-    check("bar shows tps", "400 tok/s" in joined, joined)
+    check("bar shows turns", shows(ui, "12", "turns"), joined)
+    check("bar shows steps", shows(ui, "260", "steps"), joined)
+    check("bar shows tps", shows(ui, "400", "tok/s"), joined)
     check("bar normal size", ui.root.winfo_width() == bar.NORMAL_WIDTH and ui.root.winfo_height() == bar.NORMAL_HEIGHT, (ui.root.winfo_width(), ui.root.winfo_height()))
-    check("bar has close glyph", "×" in joined, joined)
+    check("close button is a drawn control", len([i for i in ui.canvas.find_all() if ui.canvas.type(i) == "line"]) >= 4, joined)
+    ui.on_hover(Event(x=ui.width - 16, y=ui.height // 2))
+    ui.root.update()
+    check("close button highlights on hover", ui.close_hover is True)
+    ui.on_hover_leave(Event())
+    ui.root.update()
+    check("close button calms on leave", ui.close_hover is False)
 
     # A viewed session with no totals yet must not crash the bar: it shows the
     # last measured session, and zeros only when nothing is known at all.
+    # A session with no totals must not crash, and it must not claim zero work:
+    # the last measured response is the honest thing to show.
     empty_totals = work / "empty-totals.json"
     empty_totals.write_text(json.dumps({"version": 1, "sessions": {}}), encoding="utf-8")
-    fallback_ui = bar.Bar(status, current_file, empty_totals, best_file, position, 0, work / "absent-drafts.sqlite")
+    fallback_ui = bar.Bar(status, current_file, empty_totals, work / "fresh-best.json", position, 0, work / "absent-drafts.sqlite")
     fallback_ui.poll()
     fallback_ui.root.update()
-    check("unknown session keeps last measured totals", "12 turns" in " | ".join(texts_of(fallback_ui)), " | ".join(texts_of(fallback_ui)))
+    check("session without totals shows the last measurement", shows(fallback_ui, "10", "turns") and shows(fallback_ui, "274", "tok/s"), " | ".join(texts_of(fallback_ui)))
     fallback_ui.shutdown()
-    blank_best = work / "blank-best.json"
-    blank_ui = bar.Bar(status, current_file, empty_totals, blank_best, position, 0, work / "absent-drafts.sqlite")
+
+    # Nothing measured at all: zeros and a dash are the honest display.
+    blank_ui = bar.Bar(work / "no-such-status.json", current_file, empty_totals, work / "blank-best.json", position, 0, work / "absent-drafts.sqlite", work / "no-such-version.json")
     blank_ui.poll()
     blank_ui.root.update()
-    check("nothing known renders zeros", "0 turns" in " | ".join(texts_of(blank_ui)), " | ".join(texts_of(blank_ui)))
+    check("nothing measured renders zeros and a dash", shows(blank_ui, "0", "turns") and shows(blank_ui, "0", "steps") and shows(blank_ui, "–", "tok/s"), " | ".join(texts_of(blank_ui)))
     blank_ui.shutdown()
 
     # click on the × minimizes, click on the mini square restores
@@ -176,13 +200,13 @@ try:
     totals_file.write_text(json.dumps({"version": 1, "sessions": {session_id: {"turns": 20, "steps": 300, "generatedTokens": 300000, "activeStreamMs": 500000}}}), encoding="utf-8")
     ui.poll()
     ui.root.update()
-    check("bar follows totals updates", "20 turns" in " | ".join(texts()) and "600 tok/s" in " | ".join(texts()), " | ".join(texts()))
+    check("bar follows totals updates", shows(ui, "20", "turns") and shows(ui, "600", "tok/s"), " | ".join(texts()))
 
     # Without a current session the last completed session's totals remain visible.
     current_file.write_text(json.dumps({"available": False}), encoding="utf-8")
     ui.poll()
     ui.root.update()
-    check("fallback keeps last session totals", "20 turns" in " | ".join(texts()), " | ".join(texts()))
+    check("fallback keeps last session totals", shows(ui, "20", "turns"), " | ".join(texts()))
     ui.shutdown()
 
     # --- Desktop tab tracking --------------------------------------------------
@@ -218,7 +242,7 @@ try:
     tabs_ui.poll()
     tabs_ui.root.update()
     check("desktop tab wins over events", tabs_ui.current_session_id == desktop_session, tabs_ui.current_session_id)
-    check("desktop tab totals shown", "7 turns" in " | ".join(texts_of(tabs_ui)), " | ".join(texts_of(tabs_ui)))
+    check("desktop tab totals shown", shows(tabs_ui, "7", "turns"), " | ".join(texts_of(tabs_ui)))
 
     # Switching tabs in the app changes the row, and the bar follows it even
     # though the main database file keeps its timestamp (WAL write).
@@ -228,7 +252,7 @@ try:
     tabs_ui.poll()
     tabs_ui.root.update()
     check("bar follows tab switch", tabs_ui.current_session_id == other_session, tabs_ui.current_session_id)
-    check("switched tab totals shown", "9 turns" in " | ".join(texts_of(tabs_ui)), " | ".join(texts_of(tabs_ui)))
+    check("switched tab totals shown", shows(tabs_ui, "9", "turns"), " | ".join(texts_of(tabs_ui)))
     keeper.close()
 
     # No database: the bar falls back to the plugin's event session.
@@ -237,7 +261,7 @@ try:
     missing_db_ui.poll()
     missing_db_ui.root.update()
     check("missing database falls back to events", missing_db_ui.current_session_id == event_session, missing_db_ui.current_session_id)
-    check("fallback totals shown", "3 turns" in " | ".join(texts_of(missing_db_ui)), " | ".join(texts_of(missing_db_ui)))
+    check("fallback totals shown", shows(missing_db_ui, "3", "turns"), " | ".join(texts_of(missing_db_ui)))
     missing_db_ui.shutdown()
 
     # --- update notice ---------------------------------------------------------

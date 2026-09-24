@@ -37,6 +37,12 @@ That is the whole installation. Prefer no config file? Copy the folder to
 `~/.config/opencode/plugins/opencode-vitals/` and OpenCode finds it on its own. Want to change the
 history size or turn the bar off? Use the object form in [Options](#options).
 
+**Do not run `npm install opencode-vitals`.** OpenCode resolves and installs npm plugins itself at
+startup — on this machine each package lands in
+`~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. A copy you install into a project's
+`node_modules` is not what gets loaded, so it only leaves a second, stale copy on your disk. The
+config line is the whole install.
+
 ---
 
 ## Why
@@ -180,6 +186,7 @@ disappearing. Run the selftest on your machine and you will know in ten seconds.
 
 ```bash
 npx opencode-vitals-selftest    # after installing from npm
+npm exec -- opencode-vitals-selftest   # exactly the same thing, spelled out
 node selftest.mjs               # from a clone
 python3 selftest.py             # with Python directly
 ```

@@ -652,6 +652,12 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     }
   }
   check("README documents the plugins config key", /"plugins"\s*:/.test(readme) && readme.includes("opencode-vitals"))
+  // OpenCode installs npm plugins into its own cache, so an npm install of this
+  // package would only leave a stale second copy. The README may say so in prose,
+  // but no command block may tell a user to run it.
+  const shellBlocks = [...readme.matchAll(/```(?:bash|sh|shell)\n([\s\S]*?)```/g)].map((match) => match[1])
+  const forbidden = shellBlocks.filter((block) => /npm\s+(install|i)\b[^\n]*opencode-vitals/.test(block))
+  check("no command block tells users to npm install the plugin", forbidden.length === 0, JSON.stringify(forbidden))
   check("README links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
   for (const image of [...readme.matchAll(/src="([^"]+\.png)"/g)].map((match) => match[1])) {
     check(`README image ${image} exists`, existsSync(new URL(`../${image}`, import.meta.url)))

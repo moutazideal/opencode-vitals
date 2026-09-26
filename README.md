@@ -22,7 +22,22 @@
 npx opencode-vitals-selftest
 ```
 
-**2 — Add one line** to `opencode.json` or `opencode.jsonc`:
+**2 — Install it with one command:**
+
+```bash
+npx opencode-vitals-install
+```
+
+That copies the plugin into the folder OpenCode already looks in, and prints the path it used. It
+never touches your configuration file, and it makes no network calls: the package it installs is the
+one `npx` just downloaded.
+
+**3 — Restart OpenCode.** The bar is on screen within seconds.
+
+### Other ways to install
+
+Add one line to `opencode.json` or `opencode.jsonc` instead, and OpenCode installs and updates the
+package itself:
 
 ```jsonc
 {
@@ -31,11 +46,24 @@ npx opencode-vitals-selftest
 }
 ```
 
-**3 — Restart OpenCode.** The bar is on screen within seconds.
+Or copy the folder to `~/.config/opencode/plugins/opencode-vitals/` and OpenCode finds it with no
+command at all. Want to change the history size or turn the bar off? Use the object form in
+[Options](#options).
 
-That is the whole installation. Prefer no config file? Copy the folder to
-`~/.config/opencode/plugins/opencode-vitals/` and OpenCode finds it on its own. Want to change the
-history size or turn the bar off? Use the object form in [Options](#options).
+### The install command
+
+```bash
+npx opencode-vitals-install              # copy into the plugin directory
+npx opencode-vitals-install --link       # symlink instead, while working on the source
+npx opencode-vitals-install --status     # what is installed, and which version
+npx opencode-vitals-install --uninstall  # remove it again
+npx opencode-vitals-install --dir PATH   # use a plugin directory you choose
+```
+
+Installing twice updates in place and removes files that a newer release no longer ships. It refuses
+to replace a directory that holds a different package unless you pass `--force`, and it will not write
+outside the plugin directory. On Linux, macOS and Windows the plugin directory is detected from
+`XDG_CONFIG_HOME`, `~/.config` or `%APPDATA%`, and the path is printed so a wrong guess is visible.
 
 **Do not run `npm install opencode-vitals`.** OpenCode resolves and installs npm plugins itself at
 startup — on this machine each package lands in
@@ -209,7 +237,7 @@ ok   open tab read from the database — ses_example0000000000000001
 ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
 ok   session totals readable — 2 session(s)
 ok   a bar instance is running — pid 12345
-ok   plugin version recorded — running 0.1.0, package 0.1.0
+ok   plugin version recorded — running 0.1.1, package 0.1.1
 
 13/13 checks passed
 ```
@@ -264,9 +292,10 @@ How you update depends on how you installed it.
 
 | How you installed it | How to update |
 | --- | --- |
+| `npx opencode-vitals-install` | Run the same command again. It updates in place. |
+| `npx opencode-vitals-install --link` | `git pull` in the checkout; the link picks it up. |
 | `"plugins": ["opencode-vitals"]` | OpenCode owns the copy: it resolves the package at startup into `~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. Quit and reopen OpenCode after a new version is published, then check the version below. |
 | Copied the folder | Replace the files with the new release. The running plugin picks them up within about five seconds. |
-| `git clone` and symlinked it | `git pull`. Same five second pickup, no restart. |
 
 ```bash
 npm view opencode-vitals version                              # what is published now
@@ -287,7 +316,7 @@ npx opencode-vitals-selftest
 ```
 
 ```
-ok   plugin version recorded — running 0.1.0, package 0.1.0
+ok   plugin version recorded — running 0.1.1, package 0.1.1
 ```
 
 If it still reports the old version, OpenCode reused its cached snapshot. That is the normal case
@@ -303,15 +332,15 @@ reopening the window is not always enough.
 When the module is evaluated it compares its own `package.json` version with the one it recorded in
 `plugin-version.json`, with no network call involved:
 
-- the bar shows `0.1.1 installed` for eight seconds, exactly once — even if the update landed while
+- the bar shows `0.2.0 installed` for eight seconds, exactly once — even if the update landed while
   OpenCode was closed;
-- the plugin log reads `updated 0.1.0 -> 0.1.1`;
+- the plugin log reads `updated 0.1.1 -> 0.2.0`;
 - the selftest prints `running <new>, package <new>` and the previous version when there was one.
 
 ## Development
 
 ```bash
-npm test           # 103 plugin checks + 44 bar checks
+npm test           # 132 plugin checks + 44 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first
@@ -321,6 +350,8 @@ npm run prepublishOnly   # what publish runs first
 opencode-vitals/
 ├── index.js            the plugin: events, accounting, storage
 ├── bar.py              the bar: Tkinter, standard library only
+├── install.mjs         npx opencode-vitals-install
+├── selftest.mjs        launcher that finds a Python with tkinter
 ├── selftest.py         per-machine diagnosis
 ├── start-bar.sh        run the bar by hand
 └── tests/

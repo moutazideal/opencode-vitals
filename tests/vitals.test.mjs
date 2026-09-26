@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync, utimesSync } from "node:fs"
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync, utimesSync, statSync, lstatSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -676,6 +676,81 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   for (const image of [...readme.matchAll(/src="([^"]+\.png)"/g)].map((match) => match[1])) {
     check(`README image ${image} exists`, existsSync(new URL(`../${image}`, import.meta.url)))
   }
+}
+
+// 23. The one command install copies what npm ships and never surprises.
+{
+  const { install, uninstall, status, resolvePluginsDir, shippedFiles, readManifest } = await import("../install.mjs")
+  const manifest = readManifest()
+  check("manifest ships the installer", manifest.files.includes("install.mjs"), JSON.stringify(manifest.files))
+  check("installer is a declared command", manifest.bin?.["opencode-vitals-install"] === "install.mjs", JSON.stringify(manifest.bin))
+  check("shipped file list has no duplicates", new Set(shippedFiles(manifest)).size === shippedFiles(manifest).length)
+
+  const plugins = mkdtempSync(join(tmpdir(), "vitals-plugins-"))
+  const first = install({ pluginsDir: plugins, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
+  check("install reports installed", first.action === "installed", JSON.stringify(first))
+  check("install copies every shipped file", first.files === shippedFiles(manifest).length, JSON.stringify(first))
+  check("the manifest is copied too", shippedFiles(manifest).includes("package.json") && existsSync(join(plugins, "opencode-vitals", "package.json")))
+  check("installed manifest matches the package", JSON.parse(readFileSync(join(plugins, "opencode-vitals", "package.json"), "utf8")).version === manifest.version)
+  check("the shell script stays executable", (statSync(join(plugins, "opencode-vitals", "start-bar.sh")).mode & 0o111) !== 0)
+  check("the bar script stays executable", (statSync(join(plugins, "opencode-vitals", "bar.py")).mode & 0o111) !== 0)
+  check("nested directories are created", existsSync(join(plugins, "opencode-vitals", "docs", "bar.png")))
+
+  const again = install({ pluginsDir: plugins, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
+  check("installing twice is an update", again.action === "updated", JSON.stringify(again))
+  check("no nesting after a second run", !existsSync(join(plugins, "opencode-vitals", "opencode-vitals")))
+
+  // A stale file from an older release must not survive the update.
+  writeFileSync(join(plugins, "opencode-vitals", "popup.py"), "left over from the GTK era\n")
+  install({ pluginsDir: plugins, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
+  check("update removes files it no longer ships", !existsSync(join(plugins, "opencode-vitals", "popup.py")))
+
+  const reported = status({ pluginsDir: plugins })
+  check("status reports the version", reported.installed === true && reported.version === manifest.version, JSON.stringify(reported))
+
+  // Refuse to overwrite somebody else's package, and only with --force.
+  const other = mkdtempSync(join(tmpdir(), "vitals-other-"))
+  mkdirSync(join(other, "opencode-vitals"), { recursive: true })
+  writeFileSync(join(other, "opencode-vitals", "package.json"), JSON.stringify({ name: "someone-else", version: "9.9.9" }))
+  let refused = ""
+  try {
+    install({ pluginsDir: other, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
+  } catch (error) {
+    refused = error.message
+  }
+  check("install refuses a foreign package", refused.includes("different package"), refused)
+  check("the foreign package is untouched", JSON.parse(readFileSync(join(other, "opencode-vitals", "package.json"), "utf8")).name === "someone-else")
+
+  const linked = mkdtempSync(join(tmpdir(), "vitals-link-"))
+  const linkReport = install({ pluginsDir: linked, packageRoot: new URL("..", import.meta.url).pathname, mode: "link", name: "opencode-vitals" })
+  check("link mode creates a symlink", linkReport.action === "linked" && lstatSync(join(linked, "opencode-vitals")).isSymbolicLink(), JSON.stringify(linkReport))
+  const linkAgain = install({ pluginsDir: linked, packageRoot: new URL("..", import.meta.url).pathname, mode: "link", name: "opencode-vitals" })
+  check("linking twice is a no-op", linkAgain.action === "already-linked", JSON.stringify(linkAgain))
+
+  const removed = uninstall({ pluginsDir: plugins })
+  check("uninstall removes the folder", removed.action === "removed" && !existsSync(join(plugins, "opencode-vitals")), JSON.stringify(removed))
+  check("uninstall twice is harmless", uninstall({ pluginsDir: plugins }).action === "nothing-to-do")
+  check("the project itself is still here", existsSync(new URL("../index.js", import.meta.url).pathname))
+
+  // Nothing exists yet: XDG_CONFIG_HOME wins on Linux, because that is where
+  // OpenCode looks, and the printed path makes the choice visible.
+  const detected = resolvePluginsDir({ env: { XDG_CONFIG_HOME: "/tmp/xdg-here" }, platform: "linux", home: "/home/someone" })
+  check("linux honours XDG_CONFIG_HOME", detected === "/tmp/xdg-here/opencode/plugins", detected)
+  const fallback = resolvePluginsDir({ env: {}, platform: "linux", home: "/home/someone" })
+  check("linux falls back to ~/.config", fallback === "/home/someone/.config/opencode/plugins", fallback)
+  // The rule is: the first candidate that exists wins, and when none exists the
+  // primary candidate is used so the directory can be created there.
+  const existingRoot = mkdtempSync(join(tmpdir(), "vitals-existing-"))
+  mkdirSync(join(existingRoot, "opencode", "plugins"), { recursive: true })
+  const existingDir = resolvePluginsDir({ env: { XDG_CONFIG_HOME: existingRoot }, platform: "linux", home: "/home/someone" })
+  check("an existing plugin directory is chosen", existingDir === join(existingRoot, "opencode", "plugins"), existingDir)
+  // The host builds paths with its own separator, so compare normalised.
+  const windowsDir = resolvePluginsDir({ env: { APPDATA: "C:\\Users\\x\\AppData\\Roaming" }, platform: "win32", home: "C:\\Users\\x" })
+  check("windows resolves under APPDATA", windowsDir.replace(/\\/g, "/") === "C:/Users/x/AppData/Roaming/opencode/plugins", windowsDir)
+  const macDir = resolvePluginsDir({ env: {}, platform: "darwin", home: "/Users/someone" })
+  check("macos defaults to ~/.config like the docs say", macDir === "/Users/someone/.config/opencode/plugins", macDir)
+  rmSync(existingRoot, { recursive: true, force: true })
+  for (const directory of [plugins, other, linked]) rmSync(directory, { recursive: true, force: true })
 }
 
 for (const result of results) {

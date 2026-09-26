@@ -1,7 +1,11 @@
 {
   "name": "opencode-vitals",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode V2 plugin that shows session turns, steps, and average streaming tok/s in a small always-on-top bar",
+  "author": {
+    "name": "Moutaz Darwesh",
+    "url": "https://github.com/moutazideal"
+  },
   "license": "MIT",
   "type": "module",
   "main": "./index.js",
@@ -9,13 +13,15 @@
     ".": "./index.js"
   },
   "bin": {
-    "opencode-vitals-selftest": "selftest.mjs"
+    "opencode-vitals-selftest": "selftest.mjs",
+    "opencode-vitals-install": "install.mjs"
   },
   "files": [
     "index.js",
     "bar.py",
     "start-bar.sh",
     "selftest.py",
+    "install.mjs",
     "selftest.mjs",
     "docs/bar.png",
     "docs/bar-mini.png",
@@ -52,9 +58,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "author": {
-    "name": "Moutaz Darwesh",
-    "url": "https://github.com/moutazideal"
   }
 }

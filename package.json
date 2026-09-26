@@ -8,6 +8,9 @@
   "exports": {
     ".": "./index.js"
   },
+  "bin": {
+    "opencode-vitals-selftest": "selftest.mjs"
+  },
   "files": [
     "index.js",
     "bar.py",
@@ -19,9 +22,6 @@
     "README.md",
     "LICENSE"
   ],
-  "bin": {
-    "opencode-vitals-selftest": "selftest.mjs"
-  },
   "scripts": {
     "test": "node tests/vitals.test.mjs && python3 tests/bar.test.py",
     "selftest": "python3 selftest.py",
@@ -39,12 +39,6 @@
     "always-on-top",
     "session-metrics"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
-  "engines": {
-    "node": ">=18"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/moutazideal/opencode-vitals.git"
@@ -52,5 +46,15 @@
   "bugs": {
     "url": "https://github.com/moutazideal/opencode-vitals/issues"
   },
-  "homepage": "https://github.com/moutazideal/opencode-vitals#readme"
+  "homepage": "https://github.com/moutazideal/opencode-vitals#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "author": {
+    "name": "Moutaz Darwesh",
+    "url": "https://github.com/moutazideal"
+  }
 }

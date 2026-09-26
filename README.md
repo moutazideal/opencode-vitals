@@ -17,6 +17,11 @@
   </p>
 </div>
 
+<p align="center">
+  <img src="docs/desktop.png" width="900" alt="The vitals bar floating over a real OpenCode session on a Linux desktop, reading 29 turns, 239 steps and 248 tok/s while the agent works behind it">
+</p>
+<p align="center"><em>The bar over a live session on a real desktop: 29 turns · 239 steps · 248 tok/s.</em></p>
+
 ---
 
 ## Quick install

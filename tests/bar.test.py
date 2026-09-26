@@ -100,9 +100,21 @@ try:
         script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
         return subprocess.Popen([sys.executable, str(script)])
 
+    def wait_for_bar(pid):
+        # Popen returns after the fork but before the child has exec'd, so for a
+        # few milliseconds /proc/<pid>/cmdline still reads the parent's command
+        # line. Wait for the real one instead of assuming it.
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if bar.process_is_bar(pid):
+                return True
+            time.sleep(0.02)
+        return False
+
     lock = work / "bar.lock"
     bar.LOCK_ATTEMPTS, bar.LOCK_DELAY_SECONDS = 20, 0.05
     holder = spawn_fake_bar()
+    check("a fresh bar process is recognised", wait_for_bar(holder.pid))
     lock.write_text(json.dumps({"pid": holder.pid, "build": 1.0}), encoding="utf-8")
     check("older live revision replaced", bar.acquire_instance(lock, bar.build_token()) is True)
     deadline = time.time() + 5
@@ -114,6 +126,7 @@ try:
 
     same = spawn_fake_bar()
     try:
+        check("the second bar process is recognised", wait_for_bar(same.pid))
         lock.write_text(json.dumps({"pid": same.pid, "build": bar.build_token()}), encoding="utf-8")
         bar.LOCK_ATTEMPTS, bar.LOCK_DELAY_SECONDS = 2, 0.01
         check("same revision not stolen", bar.acquire_instance(lock, bar.build_token()) is False)
@@ -139,7 +152,7 @@ try:
 
     fake = spawn_fake_bar()
     try:
-        check("process_is_bar accepts bar.py", bar.process_is_bar(fake.pid) is True)
+        check("process_is_bar accepts bar.py", wait_for_bar(fake.pid))
     finally:
         fake.terminate()
         fake.wait(timeout=5)

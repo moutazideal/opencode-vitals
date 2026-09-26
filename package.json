@@ -1,6 +1,6 @@
 {
   "name": "opencode-vitals",
-  "version": "0.9.1",
+  "version": "0.1.0",
   "description": "OpenCode V2 plugin that shows session turns, steps, and average streaming tok/s in a small always-on-top bar",
   "license": "MIT",
   "type": "module",
@@ -35,12 +35,22 @@
     "tokens-per-second",
     "benchmark",
     "observability",
-    "tkinter"
+    "tkinter",
+    "always-on-top",
+    "session-metrics"
   ],
   "publishConfig": {
     "access": "public"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moutazideal/opencode-vitals.git"
+  },
+  "bugs": {
+    "url": "https://github.com/moutazideal/opencode-vitals/issues"
+  },
+  "homepage": "https://github.com/moutazideal/opencode-vitals#readme"
 }

@@ -1,0 +1,15 @@
+# Normalise line endings so a checkout on Windows keeps the shell script runnable
+# and the Python file parseable, and treat the screenshots as binary.
+* text=auto
+
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.py   text eol=lf
+*.sh   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+CHANGELOG.md text eol=lf
+
+*.png binary

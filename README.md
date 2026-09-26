@@ -149,7 +149,7 @@ cp -r opencode-vitals ~/.config/opencode/plugins/opencode-vitals
 ### From source, while you work on it
 
 ```bash
-git clone https://github.com/<your-account>/opencode-vitals.git
+git clone https://github.com/moutazideal/opencode-vitals.git
 ln -s "$PWD/opencode-vitals" ~/.config/opencode/plugins/opencode-vitals
 ```
 
@@ -204,12 +204,12 @@ ok   a preferred font exists — Ubuntu
 ok   topmost window accepted — type=toolbar, topmost=1
 ok   window transparency accepted — -alpha 0.96
 ok   undecorated window type chosen — toolbar
-ok   Desktop state database found — /home/fic/.config/ai.opencode.desktop/drafts.sqlite
-ok   open tab read from the database — ses_f360891d2ffeh6CxFC6Vq3a8zG
+ok   Desktop state database found — /home/you/.config/ai.opencode.desktop/drafts.sqlite
+ok   open tab read from the database — ses_example0000000000000001
 ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
 ok   session totals readable — 2 session(s)
-ok   a bar instance is running — pid 77600
-ok   plugin version recorded — running 0.9.1, package 0.9.1, previous 0.8.0
+ok   a bar instance is running — pid 12345
+ok   plugin version recorded — running 0.1.0, package 0.1.0
 
 13/13 checks passed
 ```
@@ -270,7 +270,7 @@ How you update depends on how you installed it.
 
 ```bash
 npm view opencode-vitals version                              # what is published now
-ls -d ~/.cache/opencode/npm/opencode-vitals@latest/* 2>/dev/null   # what OpenCode holds
+ls -d ~/.cache/opencode/npm/opencode-vitals@latest/* 2>/dev/null  # what OpenCode holds
 ```
 
 OpenCode has its own `update` setting — `"update": "notify" | "auto" | "disable"`, defaulting to
@@ -287,7 +287,7 @@ npx opencode-vitals-selftest
 ```
 
 ```
-ok   plugin version recorded — running 0.9.1, package 0.9.1, previous 0.8.0
+ok   plugin version recorded — running 0.1.0, package 0.1.0
 ```
 
 If it still reports the old version, OpenCode reused its cached snapshot. That is the normal case
@@ -303,15 +303,15 @@ reopening the window is not always enough.
 When the module is evaluated it compares its own `package.json` version with the one it recorded in
 `plugin-version.json`, with no network call involved:
 
-- the bar shows `0.9.1 installed` for eight seconds, exactly once — even if the update landed while
+- the bar shows `0.1.1 installed` for eight seconds, exactly once — even if the update landed while
   OpenCode was closed;
-- the plugin log reads `updated 0.9.0 -> 0.9.1`;
-- the selftest prints `running <new>, package <new>, previous <old>`.
+- the plugin log reads `updated 0.1.0 -> 0.1.1`;
+- the selftest prints `running <new>, package <new>` and the previous version when there was one.
 
 ## Development
 
 ```bash
-npm test           # 91 plugin checks + 44 bar checks
+npm test           # 103 plugin checks + 44 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first

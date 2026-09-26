@@ -12,6 +12,7 @@ import math
 import os
 import re
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -67,7 +68,7 @@ GAUGE_SWEEP_DEGREES = 270.0
 # measurement and comes from the session totals.
 GAUGE_FULL_SCALE_TPS = 500.0
 FONT_CANDIDATES = ("Ubuntu", "Segoe UI", "SF Pro Text", "Noto Sans", "DejaVu Sans", "Helvetica")
-SESSION_ID_PATTERN = re.compile(r"ses_[A-Za-z0-9]+")
+SESSION_ID_PATTERN = re.compile(r"ses_[A-Za-z0-9_-]+")
 DESKTOP_STATE_KEY = "tabs.recent"
 
 
@@ -309,9 +310,48 @@ def build_token(script: Path | None = None) -> float:
         return 0.0
 
 
-def pid_is_alive(pid: int) -> bool:
+def _win_pid_is_alive(pid: int) -> bool:
+    """Windows liveness, never via os.kill.
+
+    CPython documents that on Windows any signal other than CTRL_C_EVENT or
+    CTRL_BREAK_EVENT is passed to TerminateProcess, so the usual
+    os.kill(pid, 0) existence check would kill the very process it asks about —
+    including the OpenCode process this bar belongs to. OpenProcess plus
+    GetExitCodeProcess asks instead of acting.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    SYNCHRONIZE = 0x00100000
+    STILL_ACTIVE = 259
+    ERROR_ACCESS_DENIED = 5
+    ERROR_INVALID_PARAMETER = 87
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, int(pid))
+    if not handle:
+        code = ctypes.get_last_error()
+        if code == ERROR_ACCESS_DENIED:
+            return True  # It exists; it is just not ours to inspect.
+        if code == ERROR_INVALID_PARAMETER:
+            return False
+        return True  # Unknown means alive: a bar is never hidden by a failed check.
+    try:
+        status = wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(status)):
+            return status.value == STILL_ACTIVE
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def pid_is_alive(pid: int, platform: str | None = None) -> bool:
     if pid <= 0:
         return False
+    system = platform if platform is not None else ("nt" if os.name == "nt" else "posix")
+    if system == "nt":
+        return _win_pid_is_alive(pid)
     # A zombie still answers kill(pid, 0); treat it as gone.
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
@@ -327,6 +367,29 @@ def pid_is_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def process_is_bar(pid: int) -> bool:
+    """True only when the pid runs bar.py, so a recycled pid is never signalled."""
+    if not pid_is_alive(pid):
+        return False
+    if sys.platform.startswith("linux"):
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            return False
+        return "bar.py" in command
+    if sys.platform == "darwin":
+        try:
+            probe = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, timeout=3,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return "bar.py" in (probe.stdout or "")
+    # Windows cannot be asked cheaply, and this pid came from our own lock file.
+    return True
 
 
 def read_lock_holder(path: Path) -> dict[str, Any] | None:
@@ -356,12 +419,22 @@ def acquire_instance(path: Path, build: float) -> bool:
             descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             holder = read_lock_holder(path)
-            if holder and pid_is_alive(int(holder.get("pid", 0))):
+            holder_pid = int(holder.get("pid", 0)) if holder else 0
+            if holder and pid_is_alive(holder_pid):
                 if holder.get("build") != build:
-                    try:
-                        os.kill(int(holder["pid"]), signal.SIGTERM)
-                    except OSError:
-                        pass
+                    if process_is_bar(holder_pid):
+                        try:
+                            os.kill(holder_pid, signal.SIGTERM)
+                        except OSError:
+                            pass
+                    else:
+                        # A recycled pid in a stale lock: leave that process
+                        # alone and take the lock back.
+                        try:
+                            path.unlink()
+                        except OSError:
+                            pass
+                        continue
                 time.sleep(LOCK_DELAY_SECONDS)
                 continue
             try:
@@ -825,10 +898,12 @@ class Bar:
 
 
 def main() -> int:
+    # Exit codes are read by the plugin when the bar cannot stay up, so they are
+    # part of the contract: 0 normal, 3 no tkinter, 4 no window system, 5 Tk died.
     if not TK_AVAILABLE:
-        return 0
+        return 3
     if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        return 0
+        return 4
     status_file = Path(os.environ.get("OPENCODE_LATENCY_FILE", str(DEFAULT_STATUS_FILE)))
     current_session_file = Path(os.environ.get("OPENCODE_LATENCY_CURRENT_FILE", str(DEFAULT_CURRENT_SESSION_FILE)))
     totals_file = Path(os.environ.get("OPENCODE_LATENCY_TOTALS_FILE", str(DEFAULT_TOTALS_FILE)))
@@ -856,7 +931,7 @@ def main() -> int:
         try:
             return bar.run()
         except tk.TclError:
-            return 0
+            return 5
     finally:
         release_instance(lock_file)
 

@@ -20,7 +20,7 @@ import {
   rmSync,
   symlinkSync,
 } from "node:fs"
-import { homedir, platform as hostPlatform } from "node:os"
+import { homedir } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -50,19 +50,14 @@ export function shippedFiles(manifest) {
   return [...new Set(["package.json", ...listed])]
 }
 
-// Candidates are ordered by how likely the path is to be the one OpenCode reads.
-// Only the first is used, and it is printed, so a wrong guess is visible rather
-// than silent.
-export function resolvePluginsDir({ env = process.env, platform = hostPlatform, home = homedir() } = {}) {
-  const candidates = []
-  if (env.XDG_CONFIG_HOME) candidates.push(join(env.XDG_CONFIG_HOME, "opencode", "plugins"))
-  if (platform === "win32" && env.APPDATA) candidates.push(join(env.APPDATA, "opencode", "plugins"))
-  candidates.push(join(home, ".config", "opencode", "plugins"))
-  if (platform === "darwin") candidates.push(join(home, "Library", "Application Support", "opencode", "plugins"))
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate
-  }
-  return candidates[0]
+// OpenCode reads global plugins from `<config>/plugins`, where that config
+// directory is `$XDG_CONFIG_HOME/opencode` when the variable is set and
+// `~/.config/opencode` otherwise — on every platform, Windows included. This is
+// not a guess: the shipped CLI computes it as
+// `XDG_CONFIG_HOME || join(homedir(), ".config")`, then joins "opencode".
+export function resolvePluginsDir({ env = process.env, home = homedir() } = {}) {
+  const configRoot = env.XDG_CONFIG_HOME || join(home, ".config")
+  return join(configRoot, "opencode", "plugins")
 }
 
 function targetName(manifest) {
@@ -137,6 +132,8 @@ export function install({
   if (existing.kind === "file" && !force) {
     throw new Error(`${target} exists and is a file. Pass --force to replace it.`)
   }
+  // --force said replace it, so replace it rather than failing on the readdir.
+  if (existing.kind === "file") rmSync(target, { force: true })
 
   if (mode === "link") {
     if (existing.kind === "link" && existing.points === packageRoot) {
@@ -180,7 +177,7 @@ export function install({
   return {
     target,
     mode,
-    action: existing.kind === "absent" ? "installed" : "updated",
+    action: existing.kind === "absent" || existing.kind === "file" ? "installed" : "updated",
     files: copied,
     missing,
     version: manifest.version,
@@ -188,12 +185,18 @@ export function install({
   }
 }
 
-export function uninstall({ pluginsDir, name = "opencode-vitals" } = {}) {
-  const target = join(pluginsDir, name)
+export function uninstall({ pluginsDir, packageRoot = PACKAGE_ROOT, name, force = false } = {}) {
+  const manifest = readManifest(packageRoot)
+  const directory = name ?? manifest.name
+  const target = join(pluginsDir, directory)
   const existing = describeExisting(target)
   if (existing.kind === "absent") return { target, action: "nothing-to-do" }
-  if ((existing.kind === "other-package" || existing.kind === "foreign-directory") && !name) {
-    throw new Error(`${target} does not look like OpenCode Vitals.`)
+  // Removing the folder that carries our name is not proof it is ours: compare
+  // the manifest, and refuse a stranger unless --force says otherwise.
+  const installed = readInstalledManifest(target)
+  const ours = existing.kind === "link" || (installed !== null && installed.name === manifest.name)
+  if (!ours && !force) {
+    throw new Error(`${target} does not look like ${manifest.name}; pass --force to remove it anyway.`)
   }
   rmSync(target, { recursive: true, force: true })
   return { target, action: "removed", wasLink: existing.kind === "link" }
@@ -223,6 +226,7 @@ const USAGE = `opencode-vitals install
 
   --dir <path>   use this plugin directory instead of the detected one
   --force        replace what is there, even if it is a different package
+                 (with --uninstall: remove it even when it does not look like ours)
 `
 
 function parseArgs(argv) {
@@ -270,7 +274,7 @@ function main(argv) {
   }
 
   if (options.action === "uninstall") {
-    const report = uninstall({ pluginsDir })
+    const report = uninstall({ pluginsDir, force: options.force })
     process.stdout.write(
       report.action === "nothing-to-do" ? `nothing to remove in ${pluginsDir}\n` : `removed ${report.target}\n`,
     )

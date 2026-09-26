@@ -62,8 +62,13 @@ npx opencode-vitals-install --dir PATH   # use a plugin directory you choose
 
 Installing twice updates in place and removes files that a newer release no longer ships. It refuses
 to replace a directory that holds a different package unless you pass `--force`, and it will not write
-outside the plugin directory. On Linux, macOS and Windows the plugin directory is detected from
-`XDG_CONFIG_HOME`, `~/.config` or `%APPDATA%`, and the path is printed so a wrong guess is visible.
+outside the plugin directory. `--uninstall` refuses to remove a folder that does not carry this
+package's manifest unless you add `--force` too.
+
+The plugin directory is the one OpenCode itself reads — `$XDG_CONFIG_HOME/opencode/plugins`, or
+`~/.config/opencode/plugins` when that variable is unset — **on every platform, Windows included**
+(verified against the shipped CLI, which computes the same path). The path used is printed, so a
+different setup is visible rather than silent.
 
 **Do not run `npm install opencode-vitals`.** OpenCode resolves and installs npm plugins itself at
 startup — on this machine each package lands in
@@ -234,16 +239,21 @@ ok   window transparency accepted — -alpha 0.96
 ok   undecorated window type chosen — toolbar
 ok   Desktop state database found — /home/you/.config/ai.opencode.desktop/drafts.sqlite
 ok   open tab read from the database — ses_example0000000000000001
+ok   plugin installed on disk — /home/you/.config/opencode/plugins/opencode-vitals
 ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
 ok   session totals readable — 2 session(s)
 ok   a bar instance is running — pid 12345
 ok   plugin version recorded — running 0.1.1, package 0.1.1
 
-13/13 checks passed
+13/13 required checks passed, plus 1 note
+
+Ready: the bar is running on this machine.
 ```
 
-Every line is a measured fact, not an assumption. A report from another operating system is worth
-sending with a bug.
+Every line is a measured fact, not an assumption. Only the checks of what this machine can do are
+required; runtime facts are reported as notes, so a plugin that is not installed yet is never
+reported as an untrustworthy machine — the command says so and points at the install command. A
+report from another operating system is worth sending with a bug.
 
 ## Options
 
@@ -340,7 +350,7 @@ When the module is evaluated it compares its own `package.json` version with the
 ## Development
 
 ```bash
-npm test           # 132 plugin checks + 44 bar checks
+npm test           # 156 plugin checks + 54 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first

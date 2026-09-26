@@ -92,9 +92,17 @@ try:
     check("fresh session accepted", bar.load_current_session(current_file) == {"sessionID": "ses_x"})
 
     # --- instance lock --------------------------------------------------------
+    # Identity comes from the command line: a pid alone is not proof (pids are
+    # recycled), so these tests use a process that really runs a file called
+    # bar.py, exactly as the identity check expects.
+    def spawn_fake_bar():
+        script = work / "bar.py"
+        script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+        return subprocess.Popen([sys.executable, str(script)])
+
     lock = work / "bar.lock"
     bar.LOCK_ATTEMPTS, bar.LOCK_DELAY_SECONDS = 20, 0.05
-    holder = subprocess.Popen(["sleep", "30"])
+    holder = spawn_fake_bar()
     lock.write_text(json.dumps({"pid": holder.pid, "build": 1.0}), encoding="utf-8")
     check("older live revision replaced", bar.acquire_instance(lock, bar.build_token()) is True)
     deadline = time.time() + 5
@@ -104,7 +112,7 @@ try:
     bar.release_instance(lock)
     check("lock released", not lock.exists())
 
-    same = subprocess.Popen(["sleep", "30"])
+    same = spawn_fake_bar()
     try:
         lock.write_text(json.dumps({"pid": same.pid, "build": bar.build_token()}), encoding="utf-8")
         bar.LOCK_ATTEMPTS, bar.LOCK_DELAY_SECONDS = 2, 0.01
@@ -113,6 +121,47 @@ try:
     finally:
         same.terminate()
         same.wait(timeout=5)
+
+    # --- signalling identity --------------------------------------------------
+    # A stale lock whose pid was recycled must never be signalled.
+    sleeper = subprocess.Popen(["sleep", "30"])
+    check("process_is_bar rejects a sleeping process", bar.process_is_bar(sleeper.pid) is False)
+    check("process_is_bar rejects nothing", bar.process_is_bar(0) is False)
+    check("pid_is_alive rejects nonsense", bar.pid_is_alive(0) is False and bar.pid_is_alive(-7) is False)
+
+    lock.write_text(json.dumps({"pid": sleeper.pid, "build": 1.0}), encoding="utf-8")
+    bar.LOCK_ATTEMPTS, bar.LOCK_DELAY_SECONDS = 20, 0.02
+    check("a foreign live pid does not block the bar", bar.acquire_instance(lock, bar.build_token()) is True)
+    check("the foreign process was left alone", sleeper.poll() is None)
+    bar.release_instance(lock)
+    sleeper.terminate()
+    sleeper.wait(timeout=5)
+
+    fake = spawn_fake_bar()
+    try:
+        check("process_is_bar accepts bar.py", bar.process_is_bar(fake.pid) is True)
+    finally:
+        fake.terminate()
+        fake.wait(timeout=5)
+
+    # Windows liveness must never reach os.kill: CPython passes a signal of 0 to
+    # TerminateProcess there, so the usual existence check would kill the process
+    # it asks about — the OpenCode process included.
+    from unittest import mock
+
+    with mock.patch.object(bar, "_win_pid_is_alive", return_value=True), mock.patch.object(
+        bar.os, "kill", side_effect=AssertionError("os.kill must never run on nt")
+    ) as killer:
+        try:
+            nt_alive = bar.pid_is_alive(4242, platform="nt")
+        except AssertionError:
+            nt_alive = "os.kill was reached"
+    check("windows liveness never calls os.kill", nt_alive is True and killer.call_count == 0, str(nt_alive))
+
+    # Session ids may carry a dash or an underscore, and a truncated id would
+    # silently show the wrong session.
+    match = bar.SESSION_ID_PATTERN.search("sidecar/server/c2lkZWNhcg/session/ses_a1-b2_C3")
+    check("session ids may contain - and _", match is not None and match.group(0) == "ses_a1-b2_C3", match.group(0) if match else "none")
 
     dead = subprocess.Popen(["true"])
     dead.wait()
@@ -287,10 +336,31 @@ try:
     check("already seen update stays quiet", "0.9.2 installed" not in " | ".join(texts_of(seen_ui)), " | ".join(texts_of(seen_ui)))
     seen_ui.shutdown()
 
-    # --- no display: exits quietly -------------------------------------------
+    # --- no display: exits with a reason code --------------------------------
     env = {**os.environ, "DISPLAY": "", "WAYLAND_DISPLAY": ""}
     probe = subprocess.run([sys.executable, str(ROOT / "bar.py")], env=env, capture_output=True, text=True, timeout=20)
-    check("bar exits without display", probe.returncode == 0 and not probe.stderr.strip(), (probe.returncode, probe.stderr[:200]))
+    check("bar exits 4 without a display", probe.returncode == 4 and not probe.stderr.strip(), (probe.returncode, probe.stderr[:200]))
+
+    # --- selftest: only our own manifest counts as an installed Vitals -------
+    selftest = load_module("selftest_test", ROOT / "selftest.py")
+    xdg = work / "selftest-xdg"
+    plugins_dir = xdg / "opencode" / "plugins"
+    (plugins_dir / "someone-else").mkdir(parents=True)
+    (plugins_dir / "someone-else" / "index.js").write_text("// not ours\n", encoding="utf-8")
+    previous_xdg = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["XDG_CONFIG_HOME"] = str(xdg)
+    try:
+        check("another plugin is not an installation", selftest.find_installed_plugin() is None)
+        ours = plugins_dir / "opencode-vitals"
+        ours.mkdir()
+        (ours / "package.json").write_text(json.dumps({"name": "opencode-vitals"}), encoding="utf-8")
+        (ours / "index.js").write_text("// ours\n", encoding="utf-8")
+        check("our manifest is found", selftest.find_installed_plugin() == ours, str(selftest.find_installed_plugin()))
+    finally:
+        if previous_xdg is None:
+            del os.environ["XDG_CONFIG_HOME"]
+        else:
+            os.environ["XDG_CONFIG_HOME"] = previous_xdg
 finally:
     shutil.rmtree(work, ignore_errors=True)
 

@@ -22,11 +22,48 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-RESULTS: list[tuple[str, bool, str]] = []
+RESULTS: list[tuple[str, bool, str, str]] = []
+
+# A check is "required" when a failure means this machine cannot run the bar.
+# "info" checks describe runtime state that is legitimately absent before the
+# plugin is installed or before OpenCode has loaded it, and calling those a
+# failure tells a new user their machine is broken when it is not.
+REQUIRED = "required"
+INFO = "info"
+# Distinguishes "the plugin is not installed" from "the run stopped before we could
+# tell", which is why a plain None was not enough.
+UNKNOWN = object()
 
 
-def check(name: str, condition: bool, detail: str = "") -> None:
-    RESULTS.append((name, bool(condition), detail))
+def check(name: str, condition: bool, detail: str = "", severity: str = REQUIRED) -> None:
+    RESULTS.append((name, bool(condition), detail, severity))
+
+
+def find_installed_plugin() -> Path | None:
+    """Where OpenCode reads global plugins, and whether Vitals is one of them.
+
+    The search follows the shipped CLI: XDG_CONFIG_HOME when set, ~/.config
+    otherwise, on every platform. The folder must carry a manifest naming this
+    plugin — any folder with an index.js used to count as an installation.
+    """
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(config_home) if config_home else Path.home() / ".config"
+    directory = root / "opencode" / "plugins"
+    try:
+        if not directory.is_dir():
+            return None
+        for entry in directory.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                manifest = json.loads((entry / "package.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(manifest, dict) and manifest.get("name") == "opencode-vitals":
+                return entry
+    except OSError:
+        return None
+    return None
 
 
 def load_bar():
@@ -113,26 +150,39 @@ def main() -> int:
     status_dir = Path(tempfile.gettempdir()) / "opencode-latency-monitor"
     status_file = status_dir / "latest.json"
     totals_file = status_dir / "session-totals.json"
-    check("plugin status file present", status_file.is_file(), str(status_file))
-    if totals_file.is_file():
-        try:
-            sessions = json.loads(totals_file.read_text(encoding="utf-8")).get("sessions", {})
-        except (OSError, ValueError):
-            sessions = {}
-        check("session totals readable", bool(sessions), f"{len(sessions)} session(s)")
-
+    version_file = status_dir / "plugin-version.json"
     lock = status_dir / "popup.lock"
+    installed = find_installed_plugin()
+    started = version_file.is_file()
+
+    # Whether the bar is up right now decides how strict the runtime checks are.
+    # A fresh install that has not finished a response yet has no status file,
+    # and calling that a broken machine is what this file used to do.
+    running = False
+    holder: dict = {}
     if lock.is_file():
         try:
             holder = json.loads(lock.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             holder = {}
-        check("a bar instance is running", bar.pid_is_alive(int(holder.get("pid", 0))), f"pid {holder.get('pid')}")
+        running = bar.pid_is_alive(int(holder.get("pid", 0)))
+    runtime_severity = REQUIRED if running else INFO
+
+    check("plugin installed on disk", installed is not None, str(installed) if installed else "npx opencode-vitals-install", INFO)
+    check("plugin status file present", status_file.is_file(), str(status_file) if status_file.is_file() else "no response recorded yet", runtime_severity)
+    if totals_file.is_file():
+        try:
+            sessions = json.loads(totals_file.read_text(encoding="utf-8")).get("sessions", {})
+        except (OSError, ValueError):
+            sessions = {}
+        check("session totals readable", bool(sessions), f"{len(sessions)} session(s)", runtime_severity)
+
+    if lock.is_file():
+        check("a bar instance is running", running, f"pid {holder.get('pid')}", runtime_severity)
     else:
-        check("no stale bar lock", True, str(lock))
+        check("no stale bar lock", True, str(lock), INFO)
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
-    version_file = status_dir / "plugin-version.json"
     if version_file.is_file():
         try:
             recorded = json.loads(version_file.read_text(encoding="utf-8"))
@@ -143,25 +193,64 @@ def main() -> int:
             "plugin version recorded",
             recorded.get("version") == package.get("version"),
             f"running {recorded.get('version')}, package {package.get('version')}" + (f", previous {previous}" if previous else ""),
+            runtime_severity,
         )
     else:
-        check("plugin version recorded", False, f"no {version_file}; the plugin has not started yet")
+        check(
+            "plugin version recorded",
+            False,
+            "OpenCode has not loaded the plugin yet; restart it" if installed else "not installed yet",
+            INFO,
+        )
 
-    finish()
-    return 0
+    finish(installed, started, running)
+    return finish.exit_code
 
 
-def finish() -> None:
-    passed = sum(1 for _name, ok, _detail in RESULTS if ok)
+def finish(installed=UNKNOWN, started: bool = False, running: bool = False) -> int:
+    required = [row for row in RESULTS if row[3] == REQUIRED]
+    info = [row for row in RESULTS if row[3] == INFO]
     print()
-    for name, ok, detail in RESULTS:
-        line = f"{'ok  ' if ok else 'FAIL'} {name}"
+    for name, ok, detail, severity in RESULTS:
+        marker = "ok  " if ok else ("FAIL" if severity == REQUIRED else "note")
+        line = f"{marker} {name}"
         if detail:
             line += f" — {detail}"
         print(line)
-    print(f"\n{passed}/{len(RESULTS)} checks passed")
-    if passed != len(RESULTS):
+
+    passed = sum(1 for row in required if row[1])
+    failed = [row for row in required if not row[1]]
+    note_word = "note" if len(info) == 1 else "notes"
+    print(f"\n{passed}/{len(required)} required checks passed" + (f", plus {len(info)} {note_word}" if info else ""))
+
+    if failed:
         print("The bar cannot be trusted on this machine; the README lists what to do per platform.")
+        finish.exit_code = 1
+        return finish.exit_code
+    if installed is UNKNOWN:
+        print("This machine cannot draw the bar. The measurement core still works without it.")
+        finish.exit_code = 1
+        return finish.exit_code
+    if installed is None:
+        print("\nOpenCode Vitals is not installed on this machine. That is the normal answer here:")
+        print("  npx opencode-vitals-install     # install it")
+        print("  then restart OpenCode")
+        finish.exit_code = 0
+        return finish.exit_code
+    if not started:
+        print("\nInstalled, but OpenCode has not loaded it yet. Restart OpenCode, then run this again.")
+        finish.exit_code = 0
+        return finish.exit_code
+    if not running:
+        print("\nThe plugin has run here, but no bar is up right now. OpenCode is probably closed.")
+        finish.exit_code = 0
+        return finish.exit_code
+    print("\nReady: the bar is running on this machine.")
+    finish.exit_code = 0
+    return finish.exit_code
+
+
+finish.exit_code = 0
 
 
 if __name__ == "__main__":

@@ -539,7 +539,12 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const lockDir = join(sandbox, "opencode-latency-monitor")
   mkdirSync(lockDir, { recursive: true })
   const lockFile = join(lockDir, "popup.lock")
-  const victim = spawn("sleep", ["30"])
+  // The bar's identity is its command line, so the victim must really run a
+  // file called bar.py for stopPopup to consider it ours.
+  const victimScript = join(sandbox, "bar.py")
+  writeFileSync(victimScript, "import time\ntime.sleep(30)\n")
+  const victim = spawn(process.platform === "win32" ? "python" : "python3", [victimScript], { stdio: "ignore" })
+  await wait(400)
   writeFileSync(lockFile, JSON.stringify({ pid: victim.pid, build: 1 }))
   await isolated.vitalsInternals.stopPopup()
   const deadline = Date.now() + 5000
@@ -721,6 +726,34 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("install refuses a foreign package", refused.includes("different package"), refused)
   check("the foreign package is untouched", JSON.parse(readFileSync(join(other, "opencode-vitals", "package.json"), "utf8")).name === "someone-else")
 
+  // --force over a plain file replaces it instead of failing on readdir.
+  const forced = mkdtempSync(join(tmpdir(), "vitals-forced-"))
+  writeFileSync(join(forced, "opencode-vitals"), "not a directory\n")
+  let fileRefused = ""
+  try {
+    install({ pluginsDir: forced, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
+  } catch (error) {
+    fileRefused = error.message
+  }
+  check("a file needs --force", fileRefused.includes("is a file"), fileRefused)
+  const forcedReport = install({ pluginsDir: forced, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals", force: true })
+  check("--force replaces the file with the folder", forcedReport.action === "installed" && statSync(join(forced, "opencode-vitals")).isDirectory(), JSON.stringify(forcedReport))
+
+  // Uninstall must not delete a stranger that happens to sit under our name.
+  const stranger = mkdtempSync(join(tmpdir(), "vitals-stranger-"))
+  mkdirSync(join(stranger, "opencode-vitals"), { recursive: true })
+  writeFileSync(join(stranger, "opencode-vitals", "package.json"), JSON.stringify({ name: "someone-else", version: "1.0.0" }))
+  let uninstallRefused = ""
+  try {
+    uninstall({ pluginsDir: stranger, packageRoot: new URL("..", import.meta.url).pathname })
+  } catch (error) {
+    uninstallRefused = error.message
+  }
+  check("uninstall refuses a stranger", uninstallRefused.includes("does not look like"), uninstallRefused)
+  check("the stranger survived", existsSync(join(stranger, "opencode-vitals", "package.json")))
+  const forcedRemoval = uninstall({ pluginsDir: stranger, packageRoot: new URL("..", import.meta.url).pathname, force: true })
+  check("--force removes it anyway", forcedRemoval.action === "removed" && !existsSync(join(stranger, "opencode-vitals")), JSON.stringify(forcedRemoval))
+
   const linked = mkdtempSync(join(tmpdir(), "vitals-link-"))
   const linkReport = install({ pluginsDir: linked, packageRoot: new URL("..", import.meta.url).pathname, mode: "link", name: "opencode-vitals" })
   check("link mode creates a symlink", linkReport.action === "linked" && lstatSync(join(linked, "opencode-vitals")).isSymbolicLink(), JSON.stringify(linkReport))
@@ -732,25 +765,185 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("uninstall twice is harmless", uninstall({ pluginsDir: plugins }).action === "nothing-to-do")
   check("the project itself is still here", existsSync(new URL("../index.js", import.meta.url).pathname))
 
-  // Nothing exists yet: XDG_CONFIG_HOME wins on Linux, because that is where
-  // OpenCode looks, and the printed path makes the choice visible.
-  const detected = resolvePluginsDir({ env: { XDG_CONFIG_HOME: "/tmp/xdg-here" }, platform: "linux", home: "/home/someone" })
-  check("linux honours XDG_CONFIG_HOME", detected === "/tmp/xdg-here/opencode/plugins", detected)
-  const fallback = resolvePluginsDir({ env: {}, platform: "linux", home: "/home/someone" })
-  check("linux falls back to ~/.config", fallback === "/home/someone/.config/opencode/plugins", fallback)
-  // The rule is: the first candidate that exists wins, and when none exists the
-  // primary candidate is used so the directory can be created there.
+  // One rule for every platform, taken from the shipped CLI: $XDG_CONFIG_HOME
+  // when set, ~/.config otherwise, then opencode/plugins.
+  const detected = resolvePluginsDir({ env: { XDG_CONFIG_HOME: "/tmp/xdg-here" }, home: "/home/someone" })
+  check("XDG_CONFIG_HOME is honoured", detected === "/tmp/xdg-here/opencode/plugins", detected)
+  const fallback = resolvePluginsDir({ env: {}, home: "/home/someone" })
+  check("otherwise it is ~/.config/opencode/plugins", fallback === "/home/someone/.config/opencode/plugins", fallback)
+  // XDG wins outright, exactly as the CLI decides, even when another root exists.
   const existingRoot = mkdtempSync(join(tmpdir(), "vitals-existing-"))
   mkdirSync(join(existingRoot, "opencode", "plugins"), { recursive: true })
-  const existingDir = resolvePluginsDir({ env: { XDG_CONFIG_HOME: existingRoot }, platform: "linux", home: "/home/someone" })
-  check("an existing plugin directory is chosen", existingDir === join(existingRoot, "opencode", "plugins"), existingDir)
-  // The host builds paths with its own separator, so compare normalised.
-  const windowsDir = resolvePluginsDir({ env: { APPDATA: "C:\\Users\\x\\AppData\\Roaming" }, platform: "win32", home: "C:\\Users\\x" })
-  check("windows resolves under APPDATA", windowsDir.replace(/\\/g, "/") === "C:/Users/x/AppData/Roaming/opencode/plugins", windowsDir)
-  const macDir = resolvePluginsDir({ env: {}, platform: "darwin", home: "/Users/someone" })
-  check("macos defaults to ~/.config like the docs say", macDir === "/Users/someone/.config/opencode/plugins", macDir)
+  const existingDir = resolvePluginsDir({ env: { XDG_CONFIG_HOME: existingRoot }, home: "/home/someone" })
+  check("XDG wins even over an existing directory", existingDir === join(existingRoot, "opencode", "plugins"), existingDir)
   rmSync(existingRoot, { recursive: true, force: true })
-  for (const directory of [plugins, other, linked]) rmSync(directory, { recursive: true, force: true })
+  // Windows uses the same .config path: APPDATA is where the Electron app keeps
+  // its own state, not where OpenCode reads plugins.
+  const windowsDir = resolvePluginsDir({ env: { APPDATA: "C:\\Users\\x\\AppData\\Roaming" }, home: "C:\\Users\\x" })
+  check("windows uses ~/.config too", windowsDir.replace(/\\/g, "/") === "C:/Users/x/.config/opencode/plugins", windowsDir)
+  const macDir = resolvePluginsDir({ env: {}, home: "/Users/someone" })
+  check("macos uses ~/.config too", macDir === "/Users/someone/.config/opencode/plugins", macDir)
+  for (const directory of [plugins, other, linked, forced, stranger]) rmSync(directory, { recursive: true, force: true })
+}
+
+// 24. The popup retry gate: a bar that keeps dying backs off instead of
+// respawning every five seconds, and a bar we stopped is not a failure.
+{
+  const { nextPopupRetry } = vitalsInternals
+  const at = 1_000_000
+  const first = nextPopupRetry({ failures: 0, uptimeMs: 500, signal: null, now: at })
+  check("first crash waits 15s", first.failures === 1 && first.retryAt === at + 15_000, JSON.stringify(first))
+  const second = nextPopupRetry({ failures: 1, uptimeMs: 500, signal: null, now: at })
+  check("second crash waits 30s", second.retryAt === at + 30_000, JSON.stringify(second))
+  let escalated = { failures: 0, retryAt: 0 }
+  for (let index = 0; index < 10; index += 1) {
+    escalated = nextPopupRetry({ failures: escalated.failures, uptimeMs: 0, signal: null, now: at })
+  }
+  check("the wait is capped at five minutes", escalated.retryAt === at + 5 * 60_000, JSON.stringify(escalated))
+  const healthy = nextPopupRetry({ failures: 4, uptimeMs: 60_000, signal: null, now: at })
+  check("a bar that lived resets the count", healthy.failures === 0 && healthy.retryAt === 0, JSON.stringify(healthy))
+  const stopped = nextPopupRetry({ failures: 3, uptimeMs: 200, signal: "SIGTERM", now: at })
+  check("a bar we stopped is not a failure", stopped.failures === 0 && stopped.retryAt === 0, JSON.stringify(stopped))
+}
+
+// 25. The interpreter probe mirrors the selftest launcher, and the host call for
+// missing token counts gets a deadline.
+{
+  const { pythonCandidates, withTimeout } = vitalsInternals
+  const windows = pythonCandidates("win32", undefined).map((candidate) => candidate.command)
+  check("windows tries py before python", windows[0] === "py" && windows.includes("python") && windows.includes("python3"), windows.join(","))
+  const posix = pythonCandidates("linux", undefined).map((candidate) => candidate.command)
+  check("posix prefers python3", posix[0] === "python3", posix.join(","))
+  const configured = pythonCandidates("linux", "/opt/custom/python")
+  check("a configured interpreter is the only candidate", configured.length === 1 && configured[0].command === "/opt/custom/python", JSON.stringify(configured))
+
+  const fast = await withTimeout(Promise.resolve(7), 50)
+  check("withTimeout passes a value through", fast === 7, String(fast))
+  const slow = await withTimeout(new Promise(() => {}), 10)
+  check("withTimeout gives up on a hung promise", slow === undefined, String(slow))
+  const rejected = await withTimeout(Promise.reject(new Error("nope")), 50)
+  check("withTimeout swallows a rejection", rejected === undefined, String(rejected))
+}
+
+// 26. Signalling is guarded by identity: a stale lock whose pid was recycled
+// must never cost an unrelated process anything.
+{
+  const { processIsBar, stopPopup } = vitalsInternals
+  const sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" })
+  await wait(300)
+  check("a node process is not the bar", processIsBar(sleeper.pid) === false, String(sleeper.pid))
+
+  const fakeBar = join(SUITE_TMP, "bar.py")
+  writeFileSync(fakeBar, "import time\ntime.sleep(30)\n")
+  const barProcess = spawn(process.platform === "win32" ? "python" : "python3", [fakeBar], { stdio: "ignore" })
+  await wait(400)
+  check("a process running bar.py is the bar", processIsBar(barProcess.pid) === true, String(barProcess.pid))
+
+  const lockPath = join(SUITE_TMP, "opencode-latency-monitor", "popup.lock")
+  mkdirSync(join(SUITE_TMP, "opencode-latency-monitor"), { recursive: true })
+  writeFileSync(lockPath, JSON.stringify({ pid: sleeper.pid, build: 1 }))
+  await stopPopup()
+  await wait(150)
+  check("a recycled pid is left alone", sleeper.exitCode === null && sleeper.signalCode === null, `code=${sleeper.exitCode} signal=${sleeper.signalCode}`)
+
+  writeFileSync(lockPath, JSON.stringify({ pid: barProcess.pid, build: 1 }))
+  await stopPopup()
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline && barProcess.exitCode === null && barProcess.signalCode === null) await wait(50)
+  check("a real bar is asked to leave", barProcess.exitCode !== null || barProcess.signalCode !== null, `code=${barProcess.exitCode} signal=${barProcess.signalCode}`)
+  rmSync(lockPath, { force: true })
+  sleeper.kill("SIGKILL")
+  barProcess.kill("SIGKILL")
+}
+
+// 27. A compaction that fails must not mute the session. This is the scenario
+// the audit measured: the next response produced zero records.
+{
+  const sessionID = `ses_compact${unique.slice(0, 15)}`
+  const at = base + 10_000
+  const { storage, cleanup } = await run([
+    envelope("session.compaction.started", { sessionID }, at),
+    envelope("session.compaction.failed", { sessionID, error: "cancelled" }, at + 5),
+    envelope("session.inbox.enqueued", { sessionID, inboxID: "inb_c1", item: { type: "user" } }, at + 100),
+    envelope("session.execution.started", { sessionID }, at + 110),
+    envelope("session.step.started", { sessionID, assistantMessageID: "msg_c1", model: { id: "m1", providerID: "p1" }, started: at + 120 }, at + 120),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_c1", ordinal: 0, delta: "after the compaction" }, at + 200),
+    envelope("session.step.ended", { sessionID, assistantMessageID: "msg_c1", tokens: { output: 12, reasoning: 1 } }, at + 300),
+    envelope("session.execution.succeeded", { sessionID }, at + 400),
+  ])
+  const record = await waitForRecord(storage)
+  check("a response after a failed compaction is measured", record.sessionID === sessionID && record.outputTokens === 12, JSON.stringify({ session: record.sessionID, tokens: record.outputTokens }))
+  cleanup()
+}
+
+// 28. A compaction that runs inside an execution is still not a response, and
+// the session recovers for the one after it.
+{
+  const sessionID = `ses_compact2${unique.slice(0, 14)}`
+  const at = base + 20_000
+  const { storage, cleanup } = await run([
+    envelope("session.execution.started", { sessionID }, at),
+    envelope("session.compaction.started", { sessionID }, at + 10),
+    envelope("session.compaction.ended", { sessionID }, at + 20),
+    envelope("session.step.started", { sessionID, assistantMessageID: "msg_k1", started: at + 30 }, at + 30),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_k1", ordinal: 0, delta: "summary only" }, at + 100),
+    envelope("session.step.ended", { sessionID, assistantMessageID: "msg_k1", tokens: { output: 99 } }, at + 200),
+    envelope("session.execution.succeeded", { sessionID }, at + 300),
+    envelope("session.inbox.enqueued", { sessionID, inboxID: "inb_k2", item: { type: "user" } }, at + 400),
+    envelope("session.execution.started", { sessionID }, at + 410),
+    envelope("session.step.started", { sessionID, assistantMessageID: "msg_k2", started: at + 420 }, at + 420),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_k2", ordinal: 0, delta: "the real answer" }, at + 500),
+    envelope("session.step.ended", { sessionID, assistantMessageID: "msg_k2", tokens: { output: 7 } }, at + 600),
+    envelope("session.execution.succeeded", { sessionID }, at + 700),
+  ])
+  const record = await waitForRecord(storage)
+  const records = storage.value?.records ?? []
+  check("only the real answer is counted", records.length === 1 && record.messageID === "msg_k2", JSON.stringify(records.map((item) => item.messageID)))
+  cleanup()
+}
+
+// 29. A synthetic item no longer mutes the session for the next user prompt.
+{
+  const sessionID = `ses_synth${unique.slice(0, 16)}`
+  const at = base + 30_000
+  const { storage, cleanup } = await run([
+    envelope("session.inbox.enqueued", { sessionID, inboxID: "inb_syn", item: { type: "synthetic" } }, at),
+    envelope("session.inbox.delivered", { sessionID, inboxID: "inb_syn" }, at + 10),
+    envelope("session.inbox.enqueued", { sessionID, inboxID: "inb_real", item: { type: "user" } }, at + 100),
+    envelope("session.execution.started", { sessionID }, at + 110),
+    envelope("session.step.started", { sessionID, assistantMessageID: "msg_real", started: at + 120 }, at + 120),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_real", ordinal: 0, delta: "the real one" }, at + 200),
+    envelope("session.step.ended", { sessionID, assistantMessageID: "msg_real", tokens: { output: 5 } }, at + 300),
+    envelope("session.execution.succeeded", { sessionID }, at + 400),
+  ])
+  const record = await waitForRecord(storage)
+  check("a user prompt after a synthetic item is measured", record.messageID === "msg_real", JSON.stringify(record.messageID))
+  cleanup()
+}
+
+// 30. One malformed event must not stop every later measurement.
+{
+  const sessionID = `ses_hostile${unique.slice(0, 14)}`
+  const at = base + 40_000
+  const poisoned = envelope("session.text.delta", { sessionID, assistantMessageID: "msg_bad", ordinal: 0, delta: "boom" }, at)
+  Object.defineProperty(poisoned, "properties", {
+    configurable: true,
+    get() {
+      throw new Error("hostile event")
+    },
+  })
+  const { storage, cleanup } = await run([
+    poisoned,
+    envelope("session.inbox.enqueued", { sessionID, inboxID: "inb_h1", item: { type: "user" } }, at + 100),
+    envelope("session.execution.started", { sessionID }, at + 110),
+    envelope("session.step.started", { sessionID, assistantMessageID: "msg_after", started: at + 120 }, at + 120),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_after", ordinal: 0, delta: "still alive" }, at + 200),
+    envelope("session.step.ended", { sessionID, assistantMessageID: "msg_after", tokens: { output: 3 } }, at + 300),
+    envelope("session.execution.succeeded", { sessionID }, at + 400),
+  ])
+  const record = await waitForRecord(storage)
+  check("measurement survives a hostile event", record.messageID === "msg_after", JSON.stringify(record.messageID))
+  cleanup()
 }
 
 for (const result of results) {

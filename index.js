@@ -21,6 +21,13 @@ const MAX_IGNORED_MESSAGE_IDS = 500
 const MAX_CLOSED_TURNS = 500
 const MAX_INBOX_TYPES = 200
 const MARKER_PRUNE_INTERVAL_MS = 60 * 1000
+// A bar that starts and dies at once (no tkinter, no display, crashed Tk) used to
+// be retried every five seconds forever. Consecutive short-lived exits back off
+// instead, and a bar that stays up resets the counter.
+const POPUP_BACKOFF_BASE_MS = 15 * 1000
+const POPUP_BACKOFF_MAX_MS = 5 * 60 * 1000
+const POPUP_SHORT_LIVED_MS = 10 * 1000
+const SESSION_CONTEXT_TIMEOUT_MS = 3000
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 const now = () => Date.now()
@@ -35,6 +42,9 @@ const companions = globalThis[COMPANIONS_KEY] ?? (globalThis[COMPANIONS_KEY] = {
   popupBuild: 0,
   popupChain: Promise.resolve(),
   popupUnavailableUntil: 0,
+  popupFailures: 0,
+  popupStartedAt: 0,
+  popupPython: null,
   lastMarkerPruneAt: 0,
   desktopCheck: null,
 })
@@ -67,6 +77,86 @@ function pidIsAlive(pid) {
   } catch (error) {
     return error?.code === "EPERM"
   }
+}
+
+// A pid from the lock file is not proof that the process is the bar: pids are
+// recycled. Nothing is ever signalled unless the command line says bar.py, so a
+// stale lock can never kill an unrelated process. Windows is the exception, and
+// it is fail-open: the lock is ours and nothing cheaper can tell us more.
+function processIsBar(pid) {
+  if (!pidIsAlive(pid)) return false
+  if (process.platform === "linux") {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, "utf8").includes("bar.py")
+    } catch {
+      return false
+    }
+  }
+  if (process.platform === "darwin") {
+    const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 3000 })
+    return !result.error && (result.stdout ?? "").includes("bar.py")
+  }
+  return true
+}
+
+// The retry gate after a bar process ends. A signal we sent ourselves, or a bar
+// that lived long enough to be useful, resets the count; a short-lived exit
+// escalates 15s, 30s, 60s ... up to five minutes.
+function nextPopupRetry({ failures = 0, uptimeMs = 0, signal = null, now: at = Date.now() } = {}) {
+  if (signal === "SIGTERM" || signal === "SIGINT") return { failures: 0, retryAt: 0 }
+  if (uptimeMs >= POPUP_SHORT_LIVED_MS) return { failures: 0, retryAt: 0 }
+  const consecutive = failures + 1
+  const wait = Math.min(POPUP_BACKOFF_MAX_MS, POPUP_BACKOFF_BASE_MS * 2 ** (consecutive - 1))
+  return { failures: consecutive, retryAt: at + wait }
+}
+
+function withTimeout(promise, milliseconds) {
+  let timer = null
+  // No unref here on purpose: the timer must be able to fire on its own, and it
+  // is cleared as soon as the race settles either way.
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(undefined), milliseconds)
+  })
+  return Promise.race([Promise.resolve(promise).catch(() => undefined), timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
+// The bar needs a Python that can import tkinter. On Windows "python3" is often
+// the Store alias or missing entirely, so the candidates are probed instead of
+// trusted, in the same order the selftest launcher uses.
+function pythonCandidates(platform = process.platform, configured = process.env.OPENCODE_LATENCY_PYTHON) {
+  if (configured) return [{ command: configured, prefix: [] }]
+  if (platform === "win32") {
+    return [
+      { command: "py", prefix: ["-3"] },
+      { command: "python", prefix: [] },
+      { command: "python3", prefix: [] },
+    ]
+  }
+  return [
+    { command: "python3", prefix: [] },
+    { command: "python", prefix: [] },
+  ]
+}
+
+function probePython(candidate) {
+  const probe = spawnSync(candidate.command, [...candidate.prefix, "-c", "import tkinter"], { stdio: "ignore", timeout: 5000 })
+  return !probe.error && probe.status === 0
+}
+
+function resolvePython() {
+  if (companions.popupPython) return companions.popupPython
+  const candidates = pythonCandidates()
+  const working = candidates.find(probePython)
+  if (!working) {
+    console.error(
+      `[${PLUGIN_ID}] no Python with tkinter found (tried ${candidates.map((candidate) => candidate.command).join(", ")}); ` +
+        "run npx opencode-vitals-selftest to see what this machine needs",
+    )
+  }
+  companions.popupPython = working ?? candidates[0]
+  return companions.popupPython
 }
 
 function listLinuxProcesses(root, names) {
@@ -176,6 +266,8 @@ async function stopPopup() {
   }
   const pid = Number(holder?.pid)
   if (!Number.isInteger(pid) || pid <= 0 || !pidIsAlive(pid)) return
+  // A recycled pid in a stale lock must never cost somebody their process.
+  if (!processIsBar(pid)) return
   try {
     process.kill(pid, "SIGTERM")
   } catch {
@@ -204,8 +296,8 @@ async function companionIsCurrent(scriptPath) {
 }
 
 function spawnBarProcess(runtime, build) {
-  const python = process.env.OPENCODE_LATENCY_PYTHON || "python3"
-  const child = spawn(python, [BAR_SCRIPT], {
+  const python = resolvePython()
+  const child = spawn(python.command, [...python.prefix, BAR_SCRIPT], {
     detached: true,
     stdio: "ignore",
     env: {
@@ -219,14 +311,30 @@ function spawnBarProcess(runtime, build) {
   companions.popup = child
   companions.popupBuild = build
   companions.popupUnavailableUntil = 0
+  companions.popupStartedAt = Date.now()
   runtime.popup = child
   child.once("error", (error) => {
     console.error(`[${PLUGIN_ID}] bar could not start: ${String(error)}`)
-    companions.popupUnavailableUntil = Date.now() + 60_000
+    const retry = nextPopupRetry({ failures: companions.popupFailures })
+    companions.popupFailures = retry.failures
+    companions.popupUnavailableUntil = retry.retryAt
     if (companions.popup === child) companions.popup = null
   })
-  child.once("exit", () => {
+  child.once("exit", (code, signal) => {
     if (companions.popup === child) companions.popup = null
+    const uptimeMs = companions.popupStartedAt ? Date.now() - companions.popupStartedAt : 0
+    const retry = nextPopupRetry({ failures: companions.popupFailures, uptimeMs, signal })
+    companions.popupFailures = retry.failures
+    companions.popupUnavailableUntil = retry.retryAt
+    // Say why once the pattern repeats, so a machine that cannot draw the bar is
+    // not a silent five second loop. Deeper retries already backed off to minutes.
+    if (retry.failures >= 1 && retry.failures <= 4) {
+      const seconds = Math.max(1, Math.round((retry.retryAt - Date.now()) / 1000))
+      console.error(
+        `[${PLUGIN_ID}] bar exited after ${Math.round(uptimeMs)} ms ` +
+          `(code=${code ?? "none"}, signal=${signal ?? "none"}); retrying in ${seconds}s`,
+      )
+    }
   })
   child.unref()
 }
@@ -362,7 +470,10 @@ async function claimResponse(key) {
 async function withStorageLock(fn) {
   await mkdir(STATUS_DIR, { recursive: true }).catch(() => {})
   const lockPath = join(STATUS_DIR, "storage.lock")
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // Five seconds of patience before the lock is considered abandoned. The path
+  // stays fail-open on purpose: losing a measurement matters less than blocking
+  // the plugin, but it only happens after this long wait, never immediately.
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     let handle
     try {
       handle = await open(lockPath, "wx", 0o600)
@@ -494,6 +605,10 @@ function createState(rawOptions) {
   const finishQueues = new Map()
   const compactingSessions = new Set()
   const ignoredSessions = new Set()
+  // Sessions with an execution open, tracked even while compaction ignores the
+  // turn itself. Without it, "stop ignoring when the compaction ends" could not
+  // tell a compaction that runs inside an execution from one that does not.
+  const executions = new Set()
   const inboxTypes = new Map()
   const seenEventIDs = new Set()
   const ignoredMessageIDs = new Set()
@@ -899,7 +1014,11 @@ function createState(rawOptions) {
       ? totals.generatedTokens / (totals.activeStreamMs / 1000)
       : totals.tokensPerSecond
     totals.updatedAt = record.completedAt
-    while (sessionTotals.size > 50) sessionTotals.delete(sessionTotals.keys().next().value)
+    // Eviction is by least recently updated, not least recently created, so an
+    // active long-running session is not dropped while an idle newer one stays.
+    sessionTotals.delete(sessionID)
+    sessionTotals.set(sessionID, totals)
+    while (sessionTotals.size > 50) sessionTotals.delete(sessionTotals.values().next().value)
     return { ...totals }
   }
 
@@ -926,8 +1045,10 @@ function createState(rawOptions) {
   async function finishTurn(sessionID, ctx, completedAt, turn) {
     if (turn.stepCount === 0 && typeof ctx?.session?.context === "function") {
       try {
-        const context = await ctx.session.context({ sessionID })
-        const outputTokens = contextOutputTokens(context, turn.assistantMessageID)
+        // An API call into the host, so it gets a deadline: a call that never
+        // answers must not hold this session's finish queue forever.
+        const context = await withTimeout(ctx.session.context({ sessionID }), SESSION_CONTEXT_TIMEOUT_MS)
+        const outputTokens = context === undefined ? null : contextOutputTokens(context, turn.assistantMessageID)
         if (outputTokens !== null) turn.messageOutputTokens = outputTokens
       } catch {
         // Step tokens are the primary source; the context lookup is a fallback.
@@ -940,6 +1061,7 @@ function createState(rawOptions) {
     const turn = active.get(sessionID)
     compactingSessions.delete(sessionID)
     ignoredSessions.delete(sessionID)
+    executions.delete(sessionID)
     if (!turn || finishing.has(turn)) return Promise.resolve()
     finishing.add(turn)
     if (active.get(sessionID) === turn) active.delete(sessionID)
@@ -1079,6 +1201,10 @@ function createState(rawOptions) {
       }
       if (itemType === "user") {
         setCurrentSessionId(sessionID)
+        // A synthetic or move item used to mute the session until some execution
+        // completed, which swallowed the next real prompt. A new user prompt is
+        // the point at which measuring starts again.
+        ignoredSessions.delete(sessionID)
         begin(sessionID, inboxID, receivedAt, "enqueue")
         return
       }
@@ -1106,9 +1232,18 @@ function createState(rawOptions) {
       if (turn) turn.compaction = true
       return
     }
-    if (type === "session.compaction.ended" || type === "session.compaction.failed") return
+    if (type === "session.compaction.ended" || type === "session.compaction.failed") {
+      // A compaction that ends without an execution completing used to keep the
+      // session muted forever (the flag was only cleared by complete()), and the
+      // next response was lost silently: measured 0 records after a failed
+      // compaction. If an execution is still open, stay muted until it completes.
+      if (!executions.has(sessionID)) compactingSessions.delete(sessionID)
+      return
+    }
     if (type === "session.synthetic" || type === "session.usage.recorded") return
     if (type === "session.execution.started") {
+      executions.add(sessionID)
+      while (executions.size > 200) executions.delete(executions.values().next().value)
       const turn = begin(sessionID, undefined, receivedAt, "execution")
       if (turn && turn.startSource === "enqueue" && !turn.hasEvidence) {
         turn.startedAt = receivedAt
@@ -1222,6 +1357,10 @@ export const vitalsInternals = {
   processListDecision,
   barExpectedFrom,
   stopPopup,
+  processIsBar,
+  nextPopupRetry,
+  pythonCandidates,
+  withTimeout,
   readOwnVersion,
   notePluginVersion,
   claimResponse,
@@ -1280,9 +1419,17 @@ export default {
     }
 
     void (async () => {
+      let malformed = 0
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          state.handle(event, ctx)
+          // One hostile event must not end the subscription for the rest of the
+          // process: a throw in here used to stop every later measurement.
+          try {
+            state.handle(event, ctx)
+          } catch (error) {
+            malformed += 1
+            if (malformed <= 5) state.log(ctx, `ignored a malformed event: ${String(error)}`)
+          }
         }
       } catch (error) {
         if (!controller.signal.aborted) state.log(ctx, `event subscription stopped: ${String(error)}`)

@@ -17,6 +17,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
 } from "node:fs"
@@ -24,11 +25,20 @@ import { homedir } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 
+// A closed pipe (someone piped us into head) is not a failure: swallow EPIPE
+// instead of printing a stack trace and exiting non-zero.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (error) => {
+    if (error?.code !== "EPIPE") throw error
+  })
+}
+
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)))
 const EXECUTABLE_SUFFIXES = [".sh", ".py"]
 const FALLBACK_FILES = [
   "index.js",
   "bar.py",
+  "cli.mjs",
   "selftest.mjs",
   "selftest.py",
   "start-bar.sh",
@@ -291,7 +301,22 @@ function main(argv) {
   return 0
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+// npm runs bins through a symlink it creates in node_modules/.bin, and Node
+// resolves the module URL through that link while process.argv[1] keeps the
+// link's path. Comparing the two as strings would therefore be false, and the
+// command would exit silently without doing anything; resolving both is what
+// makes npx and npm's shims work.
+function isDirectRun() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (isDirectRun()) {
   try {
     process.exitCode = main(process.argv.slice(2))
   } catch (error) {

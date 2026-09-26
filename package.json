@@ -13,6 +13,7 @@
     ".": "./index.js"
   },
   "bin": {
+    "opencode-vitals": "cli.mjs",
     "opencode-vitals-selftest": "selftest.mjs",
     "opencode-vitals-install": "install.mjs"
   },
@@ -21,6 +22,7 @@
     "bar.py",
     "start-bar.sh",
     "selftest.py",
+    "cli.mjs",
     "install.mjs",
     "selftest.mjs",
     "docs/bar.png",

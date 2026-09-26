@@ -168,7 +168,7 @@ def main() -> int:
         running = bar.pid_is_alive(int(holder.get("pid", 0)))
     runtime_severity = REQUIRED if running else INFO
 
-    check("plugin installed on disk", installed is not None, str(installed) if installed else "npx opencode-vitals-install", INFO)
+    check("plugin installed on disk", installed is not None, str(installed) if installed else "npx opencode-vitals install", INFO)
     check("plugin status file present", status_file.is_file(), str(status_file) if status_file.is_file() else "no response recorded yet", runtime_severity)
     if totals_file.is_file():
         try:
@@ -233,7 +233,7 @@ def finish(installed=UNKNOWN, started: bool = False, running: bool = False) -> i
         return finish.exit_code
     if installed is None:
         print("\nOpenCode Vitals is not installed on this machine. That is the normal answer here:")
-        print("  npx opencode-vitals-install     # install it")
+        print("  npx opencode-vitals install     # install it")
         print("  then restart OpenCode")
         finish.exit_code = 0
         return finish.exit_code

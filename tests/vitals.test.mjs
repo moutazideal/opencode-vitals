@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
-import { spawn } from "node:child_process"
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync, utimesSync, statSync, lstatSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync, utimesSync, statSync, lstatSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -664,6 +664,13 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
       check(`bin ${command} exists on disk`, existsSync(new URL(`../${target}`, import.meta.url)), target)
     }
   }
+  // `npx opencode-vitals <what>` only works when the dispatcher knows <what>,
+  // so every subcommand the README prints is checked against its real list.
+  const { COMMANDS } = await import("../cli.mjs")
+  const subcommands = [...readme.matchAll(/npx\s+opencode-vitals\s+([\w-]+)/g)].map((match) => match[1])
+  for (const subcommand of new Set(subcommands)) {
+    check(`README subcommand ${subcommand} is real`, Object.hasOwn(COMMANDS, subcommand), JSON.stringify(Object.keys(COMMANDS)))
+  }
   check("README documents the plugins config key", /"plugins"\s*:/.test(readme) && readme.includes("opencode-vitals"))
   // OpenCode installs npm plugins into its own cache, so an npm install of this
   // package would only leave a stale second copy. The README may say so in prose,
@@ -676,7 +683,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const updating = readme.slice(readme.indexOf("## Updating"))
   check("updating covers the git install", /git pull/.test(updating))
   check("updating covers the copied install", /Replace the files/.test(updating))
-  check("updating tells users how to verify", /opencode-vitals-selftest/.test(updating) && /plugin version recorded — running \d+\.\d+\.\d+/.test(updating))
+  check("updating tells users how to verify", /opencode-vitals selftest/.test(updating) && /plugin version recorded — running \d+\.\d+\.\d+/.test(updating))
   check("updating links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
   for (const image of [...readme.matchAll(/src="([^"]+\.png)"/g)].map((match) => match[1])) {
     check(`README image ${image} exists`, existsSync(new URL(`../${image}`, import.meta.url)))
@@ -689,6 +696,10 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const manifest = readManifest()
   check("manifest ships the installer", manifest.files.includes("install.mjs"), JSON.stringify(manifest.files))
   check("installer is a declared command", manifest.bin?.["opencode-vitals-install"] === "install.mjs", JSON.stringify(manifest.bin))
+  // npx resolves package names, not the files inside them, so the command that
+  // newcomers type has to be a bin named after the package.
+  check("a command carries the package name", manifest.bin?.["opencode-vitals"] === "cli.mjs", JSON.stringify(manifest.bin))
+  check("the dispatcher ships with the package", manifest.files.includes("cli.mjs"), JSON.stringify(manifest.files))
   check("shipped file list has no duplicates", new Set(shippedFiles(manifest)).size === shippedFiles(manifest).length)
 
   const plugins = mkdtempSync(join(tmpdir(), "vitals-plugins-"))
@@ -944,6 +955,26 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const record = await waitForRecord(storage)
   check("measurement survives a hostile event", record.messageID === "msg_after", JSON.stringify(record.messageID))
   cleanup()
+}
+
+// 31. npm runs a bin through a symlink in node_modules/.bin, so argv[1] is the
+// link while the module URL is the target. Comparing them as strings made the
+// command exit silently — this is the regression test for that.
+{
+  const bin = mkdtempSync(join(tmpdir(), "vitals-shim-"))
+  if (process.platform !== "win32") {
+    const cliLink = join(bin, "opencode-vitals")
+    const installLink = join(bin, "opencode-vitals-install")
+    symlinkSync(new URL("../cli.mjs", import.meta.url).pathname, cliLink)
+    symlinkSync(new URL("../install.mjs", import.meta.url).pathname, installLink)
+    const help = spawnSync(process.execPath, [cliLink, "--help"], { encoding: "utf8" })
+    check("the package-named command answers", help.status === 0 && (help.stdout ?? "").includes("npx opencode-vitals install"), JSON.stringify({ status: help.status, stdout: (help.stdout ?? "").slice(0, 60) }))
+    const shimmed = spawnSync(process.execPath, [installLink, "--status", "--dir", join(bin, "plugins")], { encoding: "utf8" })
+    check("the old name still runs through a shim", shimmed.status === 0 && (shimmed.stdout ?? "").includes("not installed"), JSON.stringify({ status: shimmed.status, stdout: (shimmed.stdout ?? "").slice(0, 60) }))
+    const piped = spawnSync("sh", ["-c", `${JSON.stringify(process.execPath)} ${JSON.stringify(cliLink)} --help | head -1`], { encoding: "utf8" })
+    check("a closed pipe is quiet", piped.status === 0 && !(piped.stderr ?? "").includes("EPIPE"), JSON.stringify({ status: piped.status, stderr: (piped.stderr ?? "").slice(0, 80) }))
+  }
+  rmSync(bin, { recursive: true, force: true })
 }
 
 for (const result of results) {

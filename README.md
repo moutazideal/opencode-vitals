@@ -24,13 +24,13 @@
 **1 — Check your machine first.** It takes ten seconds and tells you whether the bar can run here:
 
 ```bash
-npx opencode-vitals-selftest
+npx opencode-vitals selftest
 ```
 
 **2 — Install it with one command:**
 
 ```bash
-npx opencode-vitals-install
+npx opencode-vitals install
 ```
 
 That copies the plugin into the folder OpenCode already looks in, and prints the path it used. It
@@ -58,12 +58,20 @@ command at all. Want to change the history size or turn the bar off? Use the obj
 ### The install command
 
 ```bash
-npx opencode-vitals-install              # copy into the plugin directory
-npx opencode-vitals-install --link       # symlink instead, while working on the source
-npx opencode-vitals-install --status     # what is installed, and which version
-npx opencode-vitals-install --uninstall  # remove it again
-npx opencode-vitals-install --dir PATH   # use a plugin directory you choose
+npx opencode-vitals               # install into the plugin directory
+npx opencode-vitals install       # the same, said out loud
+npx opencode-vitals selftest      # can this machine draw the bar?
+npx opencode-vitals status        # what is installed, and which version
+npx opencode-vitals uninstall     # remove it again
+
+npx opencode-vitals install --link       # symlink instead, while working on the source
+npx opencode-vitals install --dir PATH   # use a plugin directory you choose
 ```
+
+`npx` resolves *package* names, not the names of the files inside them, so the command has to be
+`npx opencode-vitals <what>`. The two older names still exist for scripts that add the package to a
+project: `opencode-vitals-install` and `opencode-vitals-selftest` (run them through npm as
+`npm exec --package=opencode-vitals -- opencode-vitals-install`).
 
 Installing twice updates in place and removes files that a newer release no longer ships. It refuses
 to replace a directory that holds a different package unless you pass `--force`, and it will not write
@@ -113,7 +121,7 @@ OpenCode Vitals puts that number on your screen, in the corner, all session long
 - **It follows your tab.** Switch sessions in the Desktop app and the bar switches with it.
 - **It leaves when you do.** Close OpenCode and the bar goes with it; nothing is left on screen.
 - **It tells you when it updated.** A new version announces itself once, in place of the numbers.
-- **You can check what is running.** `npx opencode-vitals-selftest` prints the loaded version, the
+- **You can check what is running.** `npx opencode-vitals selftest` prints the loaded version, the
   previous one, and every fact the bar depends on.
 
 <p align="center">
@@ -225,8 +233,7 @@ disappearing. Run the selftest on your machine and you will know in ten seconds.
 ## Does it work here? Ask the plugin
 
 ```bash
-npx opencode-vitals-selftest    # after installing from npm
-npm exec -- opencode-vitals-selftest   # exactly the same thing, spelled out
+npx opencode-vitals selftest    # after installing from npm
 node selftest.mjs               # from a clone
 python3 selftest.py             # with Python directly
 ```
@@ -307,8 +314,8 @@ How you update depends on how you installed it.
 
 | How you installed it | How to update |
 | --- | --- |
-| `npx opencode-vitals-install` | Run the same command again. It updates in place. |
-| `npx opencode-vitals-install --link` | `git pull` in the checkout; the link picks it up. |
+| `npx opencode-vitals install` | Run the same command again. It updates in place. |
+| `npx opencode-vitals install --link` | `git pull` in the checkout; the link picks it up. |
 | `"plugins": ["opencode-vitals"]` | OpenCode owns the copy: it resolves the package at startup into `~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. Quit and reopen OpenCode after a new version is published, then check the version below. |
 | Copied the folder | Replace the files with the new release. The running plugin picks them up within about five seconds. |
 
@@ -327,7 +334,7 @@ plugins is not something this project has verified.
 Do not assume an update landed. The selftest prints the loaded version, and the bar says so out loud:
 
 ```bash
-npx opencode-vitals-selftest
+npx opencode-vitals selftest
 ```
 
 ```
@@ -355,7 +362,7 @@ When the module is evaluated it compares its own `package.json` version with the
 ## Development
 
 ```bash
-npm test           # 156 plugin checks + 56 bar checks
+npm test           # 162 plugin checks + 56 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first
@@ -365,7 +372,8 @@ npm run prepublishOnly   # what publish runs first
 opencode-vitals/
 ├── index.js            the plugin: events, accounting, storage
 ├── bar.py              the bar: Tkinter, standard library only
-├── install.mjs         npx opencode-vitals-install
+├── cli.mjs             npx opencode-vitals (install, selftest, status, uninstall)
+├── install.mjs         the installer itself
 ├── selftest.mjs        launcher that finds a Python with tkinter
 ├── selftest.py         per-machine diagnosis
 ├── start-bar.sh        run the bar by hand

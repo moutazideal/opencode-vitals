@@ -10,6 +10,14 @@ import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 
+// A closed pipe (someone piped us into head) is not a failure: swallow EPIPE
+// instead of printing a stack trace and exiting non-zero.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (error) => {
+    if (error?.code !== "EPIPE") throw error
+  })
+}
+
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "selftest.py")
 const PROBE = "import tkinter"
 

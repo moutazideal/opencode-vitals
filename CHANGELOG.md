@@ -44,10 +44,22 @@ below, so the dangerous ones are in it. This release is 0.1.1 plus every fix.
   now, or ready.
 - `python3` is not trusted on Windows as the bar's interpreter: it probes
   `py -3`, `python`, `python3` for tkinter, like the selftest launcher.
+- **The install command a newcomer was told to run could not work.** The README
+  said `npx opencode-vitals-install`, but npx resolves *package* names and that
+  is the name of a file inside the package, so npm answered 404. There is a bin
+  called `opencode-vitals` now, and the documented commands are
+  `npx opencode-vitals install` and `npx opencode-vitals selftest`.
+- **The installer never actually ran from npx.** It decided whether it was
+  started directly by comparing `process.argv[1]` with its own path as strings;
+  npm runs bins through a symlink it creates in `node_modules/.bin`, so the two
+  never matched and the command exited silently with no output and status zero.
+  Both sides are resolved through symlinks now, with a regression test that runs
+  the commands through a shim like npm's.
+- A closed pipe (`| head`) printed a node stack trace; EPIPE is swallowed.
 
 ### Measured
 
-- 156 plugin checks and 56 bar checks, up from 132 and 44. Both headline fixes
+- 162 plugin checks and 56 bar checks, up from 132 and 44. Both headline fixes
   were re-measured with the same probes that found them.
 
 ## [0.1.1] - 2026-09-26

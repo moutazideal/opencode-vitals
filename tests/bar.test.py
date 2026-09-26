@@ -183,6 +183,33 @@ try:
     check("stale lock recovered", bar.acquire_instance(lock, bar.build_token()) is True)
     bar.release_instance(lock)
 
+    # --- follows the OpenCode window: minimized hides the bar, restoring shows it
+    check("window list parsed", bar.parse_window_list("_NET_CLIENT_LIST(WINDOW): window id # 0x1, 0x2a") == ["0x1", "0x2a"])
+    check("hidden state recognised", bar.window_is_hidden("_NET_WM_STATE_HIDDEN") is True)
+    check("maximized state is not hidden", bar.window_is_hidden("_NET_WM_STATE_MAXIMIZED_HORZ") is False)
+
+    listing = "_NET_CLIENT_LIST(WINDOW): window id # 0x11, 0x22"
+    outputs = {
+        ("-root", "_NET_CLIENT_LIST"): listing,
+        ("-id", "0x11", "WM_CLASS"): 'WM_CLASS(STRING) = "google-chrome", "Google-chrome"',
+        ("-id", "0x22", "WM_CLASS"): 'WM_CLASS(STRING) = "ai.opencode.desktop", "ai.opencode.desktop"',
+        ("-id", "0x22", "_NET_WM_STATE"): "_NET_WM_STATE_MAXIMIZED_HORZ",
+    }
+
+    def fake_probe(args):
+        return outputs.get(tuple(args))
+
+    window = bar.DesktopWindow(probe=fake_probe, interval_ms=0)
+    check("the OpenCode window is found by class", window.poll(now_ms=1000) is False and window.window_id == "0x22", window.window_id)
+    outputs[("-id", "0x22", "_NET_WM_STATE")] = "_NET_WM_STATE_MAXIMIZED_HORZ, _NET_WM_STATE_HIDDEN"
+    check("minimizing is seen", window.poll(now_ms=2000) is True)
+    outputs[("-id", "0x22", "_NET_WM_STATE")] = "_NET_WM_STATE_MAXIMIZED_HORZ"
+    check("restoring is seen", window.poll(now_ms=3000) is False)
+    blind = bar.DesktopWindow(probe=lambda args: None, interval_ms=0)
+    check("a missing xprop keeps the bar", blind.poll(now_ms=1000) is None)
+    blind.supported = False
+    check("another platform keeps the bar", blind.poll(now_ms=2000) is None)
+
     # --- rendering ------------------------------------------------------------
     status = work / "latest.json"
     totals_file = work / "session-totals.json"
@@ -200,6 +227,26 @@ try:
     ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "absent-drafts.sqlite", work / "ui-version.json")
     ui.poll()
     ui.root.update()
+
+    # Minimizing the OpenCode window takes the bar away; restoring it brings the
+    # bar back. The probe is injected because no window manager runs under Xvfb.
+    class FakeWindow:
+        def __init__(self):
+            self.hidden = None
+
+        def poll(self, now_ms=None):
+            return self.hidden
+
+    fake_window = FakeWindow()
+    ui.desktop_window = fake_window
+    fake_window.hidden = True
+    ui.poll()
+    ui.root.update()
+    check("the bar hides when OpenCode is minimized", ui.withdrawn is True and ui.root.winfo_viewable() == 0, (ui.withdrawn, ui.root.winfo_viewable()))
+    fake_window.hidden = False
+    ui.poll()
+    ui.root.update()
+    check("the bar returns when OpenCode is restored", ui.withdrawn is False and ui.root.winfo_viewable() == 1, (ui.withdrawn, ui.root.winfo_viewable()))
 
     def texts():
         return texts_of(ui)

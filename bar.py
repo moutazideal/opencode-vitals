@@ -70,6 +70,11 @@ GAUGE_FULL_SCALE_TPS = 500.0
 FONT_CANDIDATES = ("Ubuntu", "Segoe UI", "SF Pro Text", "Noto Sans", "DejaVu Sans", "Helvetica")
 SESSION_ID_PATTERN = re.compile(r"ses_[A-Za-z0-9_-]+")
 DESKTOP_STATE_KEY = "tabs.recent"
+# How often the bar asks the window manager whether the OpenCode window is
+# minimized. xprop on a local display answers in milliseconds, and asking four
+# times a second would be wasteful for something the eye cannot follow.
+WINDOW_CHECK_INTERVAL_MS = 1000
+DESKTOP_WINDOW_MATCHES = ("ai.opencode.desktop", "opencode-desktop", "opencode")
 
 
 def desktop_database_path() -> Path | None:
@@ -392,6 +397,75 @@ def process_is_bar(pid: int) -> bool:
     return True
 
 
+def parse_window_list(text: str) -> list[str]:
+    return re.findall(r"0x[0-9a-fA-F]+", text or "")
+
+
+def window_is_hidden(state: str) -> bool:
+    return "_NET_WM_STATE_HIDDEN" in (state or "")
+
+
+class DesktopWindow:
+    """Is the OpenCode window minimized (or on another workspace)?
+
+    Linux and X11 only, and only through xprop. When the question cannot be
+    answered — no display, another platform, xprop missing — the answer is None
+    and the bar stays visible: hiding a measurement is worse than showing one
+    too long.
+    """
+
+    def __init__(self, probe=None, patterns=DESKTOP_WINDOW_MATCHES, interval_ms=WINDOW_CHECK_INTERVAL_MS) -> None:
+        self.probe = probe or self._xprop
+        self.patterns = patterns
+        self.interval_ms = interval_ms
+        self.supported = sys.platform.startswith("linux") and bool(os.environ.get("DISPLAY"))
+        self.hidden: bool | None = None
+        self.window_id: str | None = None
+        self.checked_at = 0.0
+
+    @staticmethod
+    def _xprop(args: list[str]) -> str | None:
+        try:
+            result = subprocess.run(["xprop", *args], capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    def poll(self, now_ms: float | None = None) -> bool | None:
+        stamp = time.time() * 1000 if now_ms is None else now_ms
+        if not self.supported:
+            return None
+        if stamp - self.checked_at < self.interval_ms:
+            return self.hidden
+        self.checked_at = stamp
+        self.hidden = self._read()
+        return self.hidden
+
+    def _read(self) -> bool | None:
+        listing = self.probe(["-root", "_NET_CLIENT_LIST"])
+        if listing is None:
+            return None
+        windows = parse_window_list(listing)
+        if self.window_id not in windows:
+            self.window_id = self._find_window(windows)
+        if self.window_id is None:
+            return None
+        state = self.probe(["-id", self.window_id, "_NET_WM_STATE"])
+        if state is None:
+            return None
+        return window_is_hidden(state)
+
+    def _find_window(self, windows: list[str]) -> str | None:
+        for window in windows:
+            classes = self.probe(["-id", window, "WM_CLASS"])
+            if classes is None:
+                continue
+            lowered = classes.lower()
+            if any(pattern.lower() in lowered for pattern in self.patterns):
+                return window
+        return None
+
+
 def read_lock_holder(path: Path) -> dict[str, Any] | None:
     record = load_record(path)
     if record is None:
@@ -472,6 +546,7 @@ class Bar:
         parent_pid: int = 0,
         desktop_database: Path | None = None,
         version_file: Path | None = None,
+        window_probe=None,
     ) -> None:
         self.status_file = status_file
         self.current_session_file = current_session_file
@@ -481,6 +556,8 @@ class Bar:
         self.version_file = version_file or DEFAULT_VERSION_FILE
         self.parent_pid = parent_pid
         self.desktop_tabs = DesktopTabs(desktop_database)
+        self.desktop_window = DesktopWindow(probe=window_probe)
+        self.withdrawn = False
         self.notice_shown: tuple[str, int] | None = None
         self.notice_started_at = 0.0
         self.stopping = False
@@ -857,6 +934,7 @@ class Bar:
                 self.root.lift()
             except tk.TclError:
                 pass
+        self.apply_window_visibility(self.desktop_window.poll())
         current = load_current_session(self.current_session_file)
         event_session = current.get("sessionID") if current else None
         # The Desktop's own record of the open tab wins: OpenCode publishes no
@@ -874,6 +952,26 @@ class Bar:
         if self.parent_pid <= 0:
             return True
         return pid_is_alive(self.parent_pid)
+
+    def apply_window_visibility(self, hidden: bool | None) -> None:
+        """Follow the OpenCode window: minimized takes the bar away, restoring it
+        brings the bar back. Unknown (None: another platform, no xprop) keeps the
+        bar up, because hiding a measurement is worse than showing one too long.
+        """
+        if hidden is True and not self.withdrawn:
+            self.withdrawn = True
+            try:
+                self.root.withdraw()
+            except tk.TclError:
+                self.withdrawn = False
+        elif hidden is not True and self.withdrawn:
+            self.withdrawn = False
+            try:
+                self.root.deiconify()
+                self.root.attributes("-topmost", True)
+                self.root.lift()
+            except tk.TclError:
+                pass
 
     def shutdown(self) -> None:
         self.stopping = True

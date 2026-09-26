@@ -685,8 +685,13 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("updating covers the copied install", /Replace the files/.test(updating))
   check("updating tells users how to verify", /opencode-vitals selftest/.test(updating) && /plugin version recorded — running \d+\.\d+\.\d+/.test(updating))
   check("updating links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
+  // The README is also the npm package page, where a relative docs/bar.png
+  // resolves to nothing. Every image must be an absolute raw link, and the file
+  // it points at must be in this repository.
+  const localImage = (source) => source.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, "")
   for (const image of [...readme.matchAll(/src="([^"]+\.png)"/g)].map((match) => match[1])) {
-    check(`README image ${image} exists`, existsSync(new URL(`../${image}`, import.meta.url)))
+    check(`README image ${image} is an absolute raw link`, image.startsWith("https://raw.githubusercontent.com/"), image)
+    check(`README image ${localImage(image)} exists`, existsSync(new URL(`../${localImage(image)}`, import.meta.url)))
   }
 }
 

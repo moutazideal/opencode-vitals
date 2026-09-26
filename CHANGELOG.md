@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-09-26
+
+### Added
+
+- **The bar follows the OpenCode window.** Minimize it and the bar goes away;
+  restore it and the bar comes back. The window manager is asked over
+  `_NET_WM_STATE` with xprop on Linux/X11, at most once a second, and the window
+  is found by `WM_CLASS` (verified against the live display: `ai.opencode.desktop`
+  found, reported not hidden while maximized). When the question cannot be
+  answered — another platform, no xprop, no display — the bar stays up, because
+  hiding a measurement is worse than showing one too long.
+- Ten bar checks cover the new behaviour: window-list parsing, the hidden state,
+  the fail-open paths, and the bar withdrawing and returning.
+
+### Fixed
+
+- The README's images were relative (`docs/bar.png`), which GitHub resolves and
+  the npm package page cannot, so the package page showed broken images. Every
+  image and the changelog link are absolute now, and the README test rejects a
+  relative image source.
+- The platform table now states the window-following behaviour per platform, and
+  the tested OpenCode versions list 2.0.18.
+
+### Measured
+
+- 166 plugin checks and 66 bar checks. Three of the plugin checks enforce
+  npm-safe absolute image URLs; ten of the bar checks cover the new window
+  following behaviour.
+
 ## [0.1.3] - 2026-09-26
 
 The install command actually works now.
@@ -149,6 +178,7 @@ The first public release.
   logic is covered by tests driven by a fake process list, but no macOS or
   Windows machine has run it yet.
 
+[0.1.4]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.4
 [0.1.3]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.3
 [0.1.2]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.2
 [0.1.1]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.1

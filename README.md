@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/bar.png" width="440" alt="The OpenCode Vitals bar: a dark always-on-top card with a teal speedometer dial on the left, the readings 20 turns, 66 steps and 282 tok/s in the middle, and a circular close button on the right">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar.png" width="440" alt="The OpenCode Vitals bar: a dark always-on-top card with a teal speedometer dial on the left, the readings 20 turns, 66 steps and 282 tok/s in the middle, and a circular close button on the right">
   <h1>OpenCode Vitals</h1>
   <p><strong>Stop guessing how fast your model is. Watch it.</strong></p>
   <p>A tiny always-on-top bar for OpenCode V2 that shows one honest line for the session you are
@@ -11,14 +11,14 @@
     <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-8b5cf6">
   </p>
   <p>
-    <a href="CHANGELOG.md">Changelog</a> ·
+    <a href="https://github.com/moutazideal/opencode-vitals/blob/main/CHANGELOG.md">Changelog</a> ·
     <a href="https://github.com/moutazideal/opencode-vitals/releases">Releases</a> ·
     <a href="https://github.com/moutazideal/opencode-vitals/issues">Issues</a>
   </p>
 </div>
 
 <p align="center">
-  <img src="docs/desktop.png" width="900" alt="The vitals bar floating over a real OpenCode session on a Linux desktop, reading 29 turns, 239 steps and 248 tok/s while the agent works behind it">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/desktop.png" width="900" alt="The vitals bar floating over a real OpenCode session on a Linux desktop, reading 29 turns, 239 steps and 248 tok/s while the agent works behind it">
 </p>
 <p align="center"><em>The bar over a live session on a real desktop: 29 turns · 239 steps · 248 tok/s.</em></p>
 
@@ -124,13 +124,14 @@ OpenCode Vitals puts that number on your screen, in the corner, all session long
 - **Session-wide, not last-message.** The three numbers aggregate the whole session you are looking
   at, so a single fast reply cannot flatter a slow session.
 - **It follows your tab.** Switch sessions in the Desktop app and the bar switches with it.
-- **It leaves when you do.** Close OpenCode and the bar goes with it; nothing is left on screen.
+- **It leaves when you do.** Minimize the OpenCode window and the bar goes away; restore it and the
+  bar comes back (Linux/X11). Close OpenCode and the bar exits with it; nothing is left on screen.
 - **It tells you when it updated.** A new version announces itself once, in place of the numbers.
 - **You can check what is running.** `npx opencode-vitals selftest` prints the loaded version, the
   previous one, and every fact the bar depends on.
 
 <p align="center">
-  <img src="docs/bar-mini.png" width="120" alt="The collapsed bar: a small square showing the session tokens per second under a TOK/S caption">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar-mini.png" width="120" alt="The collapsed bar: a small square showing the session tokens per second under a TOK/S caption">
 </p>
 
 ## The numbers, exactly
@@ -211,7 +212,7 @@ OpenCode already discovered, or the running instance will be left pointing at no
 
 | | |
 | --- | --- |
-| OpenCode | V2 (developed against 2.0.14 and 2.0.16) |
+| OpenCode | V2 (developed against 2.0.14, 2.0.16 and 2.0.18) |
 | Node | 18 or newer, for the plugin |
 | Python | 3.9+ **with tkinter**, for the bar |
 | Packages to install | **none** |
@@ -230,6 +231,7 @@ Being straight about this, because "works everywhere" is usually a claim nobody 
 | Bar window | **tested** — GNOME/Mutter on X11: undecorated managed window, `_NET_WM_STATE_ABOVE`, drag, collapse, saved position | expected — Tk undecorated + topmost; best-effort against fullscreen apps | expected — Tk undecorated + topmost |
 | Follows the open tab | **tested** — `~/.config/ai.opencode.desktop/drafts.sqlite` | `~/Library/Application Support/…` (Electron convention) | `%APPDATA%\…` (Electron convention) |
 | Leaves with the app | **tested** — `/proc` scan | `pgrep` per name | `tasklist` per name |
+| Follows the window | **tested** — `_NET_WM_STATE` via xprop: the bar hides while the window is minimized and returns when it is restored | not implemented — the bar stays up | not implemented — the bar stays up |
 
 **Only the Linux column has run on real hardware.** The macOS and Windows paths are ordinary
 platform code with one rule that matters: when a check cannot run, the bar stays instead of
@@ -260,7 +262,7 @@ ok   plugin installed on disk — /home/you/.config/opencode/plugins/opencode-vi
 ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
 ok   session totals readable — 2 session(s)
 ok   a bar instance is running — pid 12345
-ok   plugin version recorded — running 0.1.3, package 0.1.3
+ok   plugin version recorded — running 0.1.4, package 0.1.4
 
 13/13 required checks passed, plus 1 note
 
@@ -343,7 +345,7 @@ npx opencode-vitals selftest
 ```
 
 ```
-ok   plugin version recorded — running 0.1.3, package 0.1.3
+ok   plugin version recorded — running 0.1.4, package 0.1.4
 ```
 
 If it still reports the old version, OpenCode reused its cached snapshot. That is the normal case
@@ -361,13 +363,13 @@ When the module is evaluated it compares its own `package.json` version with the
 
 - the bar shows `0.2.0 installed` for eight seconds, exactly once — even if the update landed while
   OpenCode was closed;
-- the plugin log reads `updated 0.1.3 -> 0.2.0`;
+- the plugin log reads `updated 0.1.4 -> 0.2.0`;
 - the selftest prints `running <new>, package <new>` and the previous version when there was one.
 
 ## Development
 
 ```bash
-npm test           # 162 plugin checks + 56 bar checks
+npm test           # 166 plugin checks + 66 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first

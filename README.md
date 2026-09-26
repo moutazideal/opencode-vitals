@@ -255,7 +255,7 @@ ok   plugin installed on disk — /home/you/.config/opencode/plugins/opencode-vi
 ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
 ok   session totals readable — 2 session(s)
 ok   a bar instance is running — pid 12345
-ok   plugin version recorded — running 0.1.2, package 0.1.2
+ok   plugin version recorded — running 0.1.3, package 0.1.3
 
 13/13 required checks passed, plus 1 note
 
@@ -338,7 +338,7 @@ npx opencode-vitals selftest
 ```
 
 ```
-ok   plugin version recorded — running 0.1.2, package 0.1.2
+ok   plugin version recorded — running 0.1.3, package 0.1.3
 ```
 
 If it still reports the old version, OpenCode reused its cached snapshot. That is the normal case
@@ -356,7 +356,7 @@ When the module is evaluated it compares its own `package.json` version with the
 
 - the bar shows `0.2.0 installed` for eight seconds, exactly once — even if the update landed while
   OpenCode was closed;
-- the plugin log reads `updated 0.1.2 -> 0.2.0`;
+- the plugin log reads `updated 0.1.3 -> 0.2.0`;
 - the selftest prints `running <new>, package <new>` and the previous version when there was one.
 
 ## Development

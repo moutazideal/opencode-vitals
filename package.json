@@ -1,6 +1,6 @@
 {
   "name": "opencode-vitals",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "OpenCode V2 plugin that shows session turns, steps, and average streaming tok/s in a small always-on-top bar",
   "author": {
     "name": "Moutaz Darwesh",

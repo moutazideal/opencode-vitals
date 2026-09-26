@@ -4,10 +4,42 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-09-26
+
+The install command actually works now.
+
+### Fixed
+
+- **The command a newcomer was told to run could not work.** The README said
+  `npx opencode-vitals-install`, but npx resolves *package* names, and that is
+  the name of a file inside the package, so npm answered 404. There is a bin
+  called `opencode-vitals` now, and the documented commands are
+  `npx opencode-vitals install` and `npx opencode-vitals selftest`.
+- **The installer never actually ran from npx.** It decided whether it was
+  started directly by comparing `process.argv[1]` with its own path as strings;
+  npm runs bins through a symlink it creates in `node_modules/.bin`, so the two
+  never matched and the command exited silently, with no output and status zero.
+  Both sides are resolved through symlinks now, with a regression test that runs
+  the commands through a shim shaped exactly like npm's.
+- A closed pipe (`| head`) printed a node stack trace; EPIPE is swallowed.
+- The README test that generated its checks from the README's npx commands now
+  also proves that every subcommand it prints is one the dispatcher accepts.
+
+### Measured
+
+- 162 plugin checks and 56 bar checks, up from 156 and 56. The install, status,
+  the `--status` alias and uninstall were run end to end from a packed tarball
+  installed through npm.
+
 ## [0.1.2] - 2026-09-26
 
 0.1.1 was published before an audit of the shipped code found the problems
 below, so the dangerous ones are in it. This release is 0.1.1 plus every fix.
+
+**The install command printed in this release's README does not work**: npm
+answers `npx opencode-vitals-install` with 404, and the installer exits silently
+when npm runs it through a shim. Both are fixed in 0.1.3, which is otherwise the
+same code.
 
 ### Fixed
 
@@ -44,22 +76,9 @@ below, so the dangerous ones are in it. This release is 0.1.1 plus every fix.
   now, or ready.
 - `python3` is not trusted on Windows as the bar's interpreter: it probes
   `py -3`, `python`, `python3` for tkinter, like the selftest launcher.
-- **The install command a newcomer was told to run could not work.** The README
-  said `npx opencode-vitals-install`, but npx resolves *package* names and that
-  is the name of a file inside the package, so npm answered 404. There is a bin
-  called `opencode-vitals` now, and the documented commands are
-  `npx opencode-vitals install` and `npx opencode-vitals selftest`.
-- **The installer never actually ran from npx.** It decided whether it was
-  started directly by comparing `process.argv[1]` with its own path as strings;
-  npm runs bins through a symlink it creates in `node_modules/.bin`, so the two
-  never matched and the command exited silently with no output and status zero.
-  Both sides are resolved through symlinks now, with a regression test that runs
-  the commands through a shim like npm's.
-- A closed pipe (`| head`) printed a node stack trace; EPIPE is swallowed.
-
 ### Measured
 
-- 162 plugin checks and 56 bar checks, up from 132 and 44. Both headline fixes
+- 156 plugin checks and 56 bar checks, up from 132 and 44. Both headline fixes
   were re-measured with the same probes that found them.
 
 ## [0.1.1] - 2026-09-26
@@ -130,6 +149,7 @@ The first public release.
   logic is covered by tests driven by a fake process list, but no macOS or
   Windows machine has run it yet.
 
+[0.1.3]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.3
 [0.1.2]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.2
 [0.1.1]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.1
 [0.1.0]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.0

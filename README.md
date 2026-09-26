@@ -1,9 +1,10 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar.png" width="440" alt="The OpenCode Vitals bar: a dark always-on-top card with a teal speedometer dial on the left, the readings 20 turns, 66 steps and 282 tok/s in the middle, and a circular close button on the right">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar.png" width="560" alt="The OpenCode Vitals bar: a dark always-on-top card with a teal speedometer dial on the left, the readings 34 turns, 210 steps, 318 tok/s and the last-ten reading 331 last10 across the middle, a resize grip in the bottom-right corner and a circular close button on the right">
   <h1>OpenCode Vitals</h1>
   <p><strong>Stop guessing how fast your model is. Watch it.</strong></p>
   <p>A tiny always-on-top bar for OpenCode V2 that shows one honest line for the session you are
-  working in: turns, steps, and average streaming tokens per second.</p>
+  working in: turns, steps, the average streaming tokens per second, and the average of the last ten
+  responses beside it.</p>
   <p>
     <img alt="platform: Linux verified, macOS and Windows expected" src="https://img.shields.io/badge/platform-Linux%20verified%20%7C%20macOS%20%2B%20Windows%20expected-2ea44f">
     <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-2ea44f">
@@ -18,9 +19,9 @@
 </div>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/desktop.png" width="900" alt="The vitals bar floating over a real OpenCode session on a Linux desktop, reading 29 turns, 239 steps and 248 tok/s while the agent works behind it">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/desktop.png" width="900" alt="The vitals bar floating over a real OpenCode session on a Linux desktop, reading 7 turns, 66 steps, 243 tok/s and the last-ten reading 311 last10 while a session waits behind it">
 </p>
-<p align="center"><em>The bar over a live session on a real desktop: 29 turns · 239 steps · 248 tok/s.</em></p>
+<p align="center"><em>The bar over a live session on a real desktop: 7 turns · 66 steps · 243 tok/s · 311 last10.</em></p>
 
 ---
 
@@ -111,27 +112,27 @@ OpenCode Vitals puts that number on your screen, in the corner, all session long
 ## What you get
 
 ```
-◔  19 turns   65 steps   282 tok/s
+◔  34 turns   210 steps   318 tok/s   · 331 last10
 ```
 
-- **Always on top, never in the way.** 360×54 pixels, undecorated, no taskbar entry, no focus
-  steal. Drag it anywhere; the position is remembered. Click the close button and it collapses to a
-  small square that keeps showing tok/s; click the square to bring it back.
-- **A dial, not a dot.** The gauge is a real speedometer: a 270° track, five ticks, a needle on the
-  session's tok/s, and a soft teal glow that only appears when there is a measurement. Numbers are
-  drawn bright with their units dimmed, and tok/s carries the accent colour, so the eye lands on the
-  number you actually came for.
-- **Session-wide, not last-message.** The three numbers aggregate the whole session you are looking
-  at, so a single fast reply cannot flatter a slow session.
-- **It follows your tab.** Switch sessions in the Desktop app and the bar switches with it.
-- **It leaves when you do.** Minimize the OpenCode window and the bar goes away; restore it and the
-  bar comes back (Linux/X11). Close OpenCode and the bar exits with it; nothing is left on screen.
-- **It tells you when it updated.** A new version announces itself once, in place of the numbers.
-- **You can check what is running.** `npx opencode-vitals selftest` prints the loaded version, the
-  previous one, and every fact the bar depends on.
+Every feature, in one place:
+
+| Feature | What it does |
+| --- | --- |
+| **Session average** | Turns, steps and average streaming tok/s for the session you are looking at, so one fast reply cannot flatter a long session. |
+| **Last ten responses** | `· N last10` is the mean of the rates of the last ten completed responses, next to the session average. The session average is the whole session divided as one sum; this one moves as soon as a slow reply lands, which is what tells you the session just changed character. A response with no honest rate is skipped, not counted as a zero. |
+| **Always on top** | 390×54 pixels by default, undecorated, no taskbar entry, no focus steal, slightly transparent. |
+| **Any size you like** | Drag the bottom-right grip to resize, or hold **Ctrl** and use the wheel. Everything scales together — card, dial and text — the aspect ratio stays, and the size is remembered. **Right-click** resets it to 100%. |
+| **Move it anywhere** | Drag the body; the position is remembered. `OPENCODE_LATENCY_POSITION` picks the first corner instead. |
+| **Collapse** | Click the × and the bar shrinks to a small square that keeps showing tok/s; click the square to bring it back. The collapsed bar scales with the same size setting. |
+| **It follows your tab** | Switch sessions in the Desktop app and the bar switches with it (reads one row, `tabs.recent`, read-only). |
+| **It follows your attention** | Minimize the OpenCode window, switch to another program, or let a window cover OpenCode, and the bar steps aside; come back and it returns. Linux/X11, and fail-open: when it cannot tell, the bar stays. |
+| **It leaves when you do** | Close OpenCode and the bar exits with it; nothing is left on screen. |
+| **It tells you when it updated** | A new version announces itself once, in place of the numbers. |
+| **You can check what is running** | `npx opencode-vitals selftest` prints the loaded version, the previous one, and every fact the bar depends on. |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar-mini.png" width="120" alt="The collapsed bar: a small square showing the session tokens per second under a TOK/S caption">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar-mini.png" width="140" alt="The collapsed bar: a small square showing the session tokens per second under a TOK/S caption">
 </p>
 
 ## The numbers, exactly
@@ -144,17 +145,51 @@ No estimates, no invented numbers. Every value is read from OpenCode's own event
 | **steps** | Model steps across those responses, so a response that called tools five times is not mistaken for a fast one. |
 | **tok/s** | `generated tokens ÷ active stream time`, where generated tokens are output plus reasoning tokens, and active stream time is the time the model was actually streaming. Tool executions between steps stay **out** of the denominator. |
 
+How the denominator is chosen, and what each record says about it (`rateSource`):
+
+| `rateSource` | The stream time used |
+| --- | --- |
+| `stream-span` | The real streaming span: from the first delta of a message to its last, summed over the messages of that response. |
+| `first-to-last` | The reply arrived as one piece with no measurable span, so the time from its first token to its last is used. |
+| `single-message-total` | The same, and the whole turn was that one message and one step: its own wall time is used. |
+| `unavailable` | No honest denominator exists (a multi-message or multi-step response with no measurable stream, i.e. mostly tool time), so `tok/s` stays `–`. |
+
+What counts as model time, and what does not:
+
+| Measured as model time | Not measured |
+| --- | --- |
+| Text deltas (`session.text.delta`) | Running a tool (`session.tool.called`/`success`), however fast or slow |
+| Thinking deltas (`session.reasoning.delta`) | Waiting in a queue, compaction, synthetic items |
+| The model writing a tool call's arguments (`session.tool.input.delta`) | Anything the provider never reports |
+
+That last row is what makes the number honest: a step's token count includes the tokens it spends
+writing a tool call, so the time spent writing them has to be in the denominator too. Skipping it
+used to print `4686 tok/s` on a real turn whose only visible text was 80 characters.
+
+A silence longer than 30 seconds under one message is a dropped connection coming back, not a slow
+model, so the span restarts there instead of counting the gap. Session totals are replaced as a whole
+snapshot rather than field by field: the tokens of one moment are never divided by the stream time of
+another.
+
 Deliberately excluded, because including them would flatter the number:
 
 - **Compaction executions** and synthetic inbox items — they are not your work.
 - **Duplicate completions, late deltas, and repeated plugin instances** — deduplicated by event and
   response identity, so a reconnect cannot inflate a session.
 - **Wall-clock turn time** — it mixes model thinking with your tools.
+- **Parallel and subagent executions** — a second execution starting while one is open closes the
+  first, so two answers running at once are two turns instead of one inflated one.
+
+Events this plugin does not recognise are counted and reported on the record
+(`unknownEventTypes`) rather than dropped in silence: a renamed or removed OpenCode event would
+otherwise delete measurements with no error anywhere. Events that are known but not part of the
+measurement — running tools, shells, skills, interface state — are listed as ignored and never
+reported.
 
 If the provider reports no token counts, `tok/s` shows `–` instead of guessing. Per-turn detail
-(`firstTokenMs`, `firstTextMs`, `firstCharMs`, `totalMs`, `activeStreamMs`, per-model and per-agent
-token counts) stays in the plugin's own storage, capped at 100 records, if you want to compute
-something else.
+(`firstTokenMs`, `firstTextMs`, `firstCharMs`, `totalMs`, `activeStreamMs`, `toolArgCharacters`,
+`rateSource`, per-model and per-agent token counts) stays in the plugin's own storage, capped at 100
+records, if you want to compute something else.
 
 ## Install
 
@@ -232,6 +267,8 @@ Being straight about this, because "works everywhere" is usually a claim nobody 
 | Follows the open tab | **tested** — `~/.config/ai.opencode.desktop/drafts.sqlite` | `~/Library/Application Support/…` (Electron convention) | `%APPDATA%\…` (Electron convention) |
 | Leaves with the app | **tested** — `/proc` scan | `pgrep` per name | `tasklist` per name |
 | Follows the window | **tested** — `_NET_WM_STATE` via xprop: the bar hides while the window is minimized and returns when it is restored | not implemented — the bar stays up | not implemented — the bar stays up |
+| Follows your attention | **tested** — `_NET_ACTIVE_WINDOW` for focus and `_NET_CLIENT_LIST_STACKING` plus window geometry for a covering window; fail-open when either cannot be read | not implemented — the bar stays up | not implemented — the bar stays up |
+| Resize (grip, Ctrl+wheel) | **tested** — works anywhere Tk draws | expected — same code | expected — same code |
 
 **Only the Linux column has run on real hardware.** The macOS and Windows paths are ordinary
 platform code with one rule that matters: when a check cannot run, the bar stays instead of
@@ -262,7 +299,7 @@ ok   plugin installed on disk — /home/you/.config/opencode/plugins/opencode-vi
 ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
 ok   session totals readable — 2 session(s)
 ok   a bar instance is running — pid 12345
-ok   plugin version recorded — running 0.1.4, package 0.1.4
+ok   plugin version recorded — running 0.1.5, package 0.1.5
 
 13/13 required checks passed, plus 1 note
 
@@ -280,7 +317,7 @@ report from another operating system is worth sending with a bug.
 | --- | --- | --- |
 | `popup` | `true` | Show the bar. `false` keeps measuring with no window. |
 | `historyLimit` | `20` | Measurements kept in storage, 1–100. |
-| `log` | `true` | Log one line per measurement through OpenCode's logger. |
+| `log` | `false` | Log one line per measurement through OpenCode's logger. Errors and version changes are printed either way. |
 | `enabled` | `true` | Master switch. |
 
 ```json
@@ -294,9 +331,22 @@ report from another operating system is worth sending with a bug.
 }
 ```
 
-Environment variables, for the curious: `OPENCODE_LATENCY_PYTHON` (interpreter),
-`OPENCODE_LATENCY_POSITION` (`top-right`, `top-left`, `bottom-right`, `bottom-left`),
-`OPENCODE_LATENCY_DESKTOP_DB` (where the app keeps its state database).
+Environment variables, for the bar and for the curious:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `OPENCODE_LATENCY_PYTHON` | detected | Interpreter used for the bar, instead of probing `python3`/`python`/`py`. |
+| `OPENCODE_LATENCY_POSITION` | `top-right` | Where the bar first appears: `top-right`, `top-left`, `bottom-right`, `bottom-left`. |
+| `OPENCODE_LATENCY_SCALE` | remembered | Size multiplier, `0.6`–`2.5`. Overrides the size the user dragged. |
+| `OPENCODE_LATENCY_HIDE_UNFOCUSED` | `1` | `0` keeps the bar visible when another program takes focus. |
+| `OPENCODE_LATENCY_HIDE_OCCLUDED` | `1` | `0` keeps the bar visible when another window covers OpenCode. |
+| `OPENCODE_LATENCY_DESKTOP_DB` | detected | Where the Desktop app keeps its state database. |
+
+The bar's own files (`OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_CURRENT_FILE`,
+`OPENCODE_LATENCY_TOTALS_FILE`, `OPENCODE_LATENCY_BEST_TOTALS_FILE`, `OPENCODE_LATENCY_POSITION_FILE`,
+`OPENCODE_LATENCY_SCALE_FILE`, `OPENCODE_LATENCY_VERSION_FILE`,
+`OPENCODE_LATENCY_LOCK_FILE`, `OPENCODE_LATENCY_PARENT_PID`) exist so the bar can be run against an
+isolated directory — the test suite uses them — and rarely need to be set by hand.
 
 ## Privacy
 
@@ -305,7 +355,7 @@ pings. It reads OpenCode's own event stream and writes a handful of small JSON f
 system temporary directory.
 
 - **Prompts and responses are never stored.** Only counts, timings, model and agent names, and
-  session/message identifiers.
+  session/message identifiers. The last-ten reading is a list of numbers and nothing else.
 - **One deliberate exception, and you can switch it off by moving the file:** to know which tab you
   are looking at, the bar reads a single row (`tabs.recent`) from the Desktop app's own state
   database, opened **read-only**. No draft text is read. Point `OPENCODE_LATENCY_DESKTOP_DB`
@@ -345,7 +395,7 @@ npx opencode-vitals selftest
 ```
 
 ```
-ok   plugin version recorded — running 0.1.4, package 0.1.4
+ok   plugin version recorded — running 0.1.5, package 0.1.5
 ```
 
 If it still reports the old version, OpenCode reused its cached snapshot. That is the normal case
@@ -363,13 +413,13 @@ When the module is evaluated it compares its own `package.json` version with the
 
 - the bar shows `0.2.0 installed` for eight seconds, exactly once — even if the update landed while
   OpenCode was closed;
-- the plugin log reads `updated 0.1.4 -> 0.2.0`;
+- the plugin log reads `updated 0.1.5 -> 0.2.0`;
 - the selftest prints `running <new>, package <new>` and the previous version when there was one.
 
 ## Development
 
 ```bash
-npm test           # 166 plugin checks + 66 bar checks
+npm test           # 223 plugin checks + 135 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first
@@ -391,9 +441,10 @@ opencode-vitals/
 
 The test suite includes the mistakes worth catching twice: zombie holders in the singleton lock, a
 session with no totals yet (which must fall back to the last measurement instead of claiming zero
-work), a WAL write that leaves the database timestamp untouched, and process checks on macOS and
+work), a WAL write that leaves the database timestamp untouched, process checks on macOS and
 Windows driven by a fake process list so their logic is verified even though their hardware was
-not.
+not, a turn whose tokens were counted while the time spent writing its tool call was not, and a
+window that covers OpenCode while focus never left it.
 
 ## License
 

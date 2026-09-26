@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 import platform
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -139,6 +140,14 @@ def main() -> int:
     if sys.platform.startswith("linux") and managed:
         check("undecorated window type chosen", window_type in ("toolbar", "splash", "dock"), window_type)
     probe.destroy()
+
+    # Following the window — minimized, unfocused, or covered — is asked of the
+    # window server with xprop and xwininfo. Without them the bar simply stays
+    # up, so this is a note, not a failure.
+    if sys.platform.startswith("linux") and os.environ.get("DISPLAY"):
+        for tool in ("xprop", "xwininfo"):
+            found = shutil.which(tool)
+            check(f"{tool} available for window following", found is not None, found or "install x11-utils; the bar will stay visible instead of following", INFO)
 
     database = bar.desktop_database_path()
     override = os.environ.get("OPENCODE_LATENCY_DESKTOP_DB")

@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 // One command install for OpenCode Vitals.
 //
-//     npx opencode-vitals-install
+//     npx opencode-vitals install
+//
+// npx resolves *package* names, not the names of the files inside them, so the
+// command a newcomer is told to run has to be a bin called `opencode-vitals`.
+// This file stays reachable as `opencode-vitals-install` for scripts that add
+// the package to a project, but the documented spelling is the package name.
 //
 // OpenCode loads every plugin folder under its plugin directory, so the
 // simplest install is to put the package there and leave the configuration file
@@ -227,16 +232,17 @@ export function status({ pluginsDir, name = "opencode-vitals" } = {}) {
   }
 }
 
-const USAGE = `opencode-vitals install
+const USAGE = `opencode-vitals
 
-  npx opencode-vitals-install              copy the plugin into the OpenCode plugin directory
-  npx opencode-vitals-install --link       symlink it instead, for working on the source
-  npx opencode-vitals-install --status     report what is installed
-  npx opencode-vitals-install --uninstall  remove it again
+  npx opencode-vitals               install into the plugin directory OpenCode reads
+  npx opencode-vitals install       the same, said out loud
+  npx opencode-vitals status        report what is installed and which version
+  npx opencode-vitals uninstall     remove it again
 
-  --dir <path>   use this plugin directory instead of the detected one
-  --force        replace what is there, even if it is a different package
-                 (with --uninstall: remove it even when it does not look like ours)
+  --link          symlink instead of copying, for working on the source
+  --dir <path>    use this plugin directory instead of the detected one
+  --force         replace what is there, even if it is a different package
+                  (with uninstall: remove it even when it does not look like ours)
 `
 
 function parseArgs(argv) {

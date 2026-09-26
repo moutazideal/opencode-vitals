@@ -1,12 +1,17 @@
 import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
-import { readdirSync, readFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-const PLUGIN_ID = "latency-monitor"
+const PLUGIN_ID = "opencode-vitals"
+// The status directory and the OPENCODE_LATENCY_* variables keep the name this
+// plugin had before it was called opencode-vitals. The bar, the selftest and
+// every installed copy agree on those strings, so renaming them here would
+// orphan a bar that is already running. PLUGIN_ID only ever appears in a log
+// line, so it carries the name people actually recognise.
 const STORAGE_KEY = "history-v2"
 const DEFAULT_HISTORY_LIMIT = 20
 const MAX_HISTORY_LIMIT = 100
@@ -27,7 +32,21 @@ const MARKER_PRUNE_INTERVAL_MS = 60 * 1000
 const POPUP_BACKOFF_BASE_MS = 15 * 1000
 const POPUP_BACKOFF_MAX_MS = 5 * 60 * 1000
 const POPUP_SHORT_LIVED_MS = 10 * 1000
+// The bar exits with this code when another instance already owns the lock.
+// That is the correct outcome, not a crash, so it must not escalate the backoff
+// or fill the log with a bar that "failed".
+const LOCK_HELD_EXIT_CODE = 6
+const LOCK_HELD_RETRY_MS = 30 * 1000
 const SESSION_CONTEXT_TIMEOUT_MS = 3000
+// A stream that stops for longer than this and then continues under the same
+// message id was interrupted (a reconnect, a resumed generation). The idle gap
+// is not model time, so it must not end up in the denominator of tok/s.
+const STREAM_GAP_LIMIT_MS = 30 * 1000
+// The status directory lives in a temporary directory, which on Linux is
+// world-writable and shared. 0700 keeps another local user out of the files.
+const STATUS_DIR_MODE = 0o700
+const UNKNOWN_TYPE_LIMIT = 50
+const UNKNOWN_TYPE_LOG_INTERVAL_MS = 5 * 60 * 1000
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 const now = () => Date.now()
@@ -51,6 +70,11 @@ const companions = globalThis[COMPANIONS_KEY] ?? (globalThis[COMPANIONS_KEY] = {
 
 const BAR_LOCK = join(STATUS_DIR, "popup.lock")
 const PLUGIN_VERSION_FILE = join(STATUS_DIR, "plugin-version.json")
+// How many recent responses the bar averages for its "last 10" reading. The
+// session average answers "is this session fast"; this answers "was the work I
+// just watched fast", which is the question a long session's average stops
+// being able to answer.
+const RECENT_RATE_COUNT = 10
 // The OpenCode service is supervised by systemd and outlives the Desktop app, so
 // the bar cannot be tied to the plugin process alone. No server event reports a
 // client disconnect, so the app process itself is the signal.
@@ -99,12 +123,18 @@ function processIsBar(pid) {
   return true
 }
 
-// The retry gate after a bar process ends. A signal we sent ourselves, or a bar
-// that lived long enough to be useful, resets the count; a short-lived exit
+// The retry gate after a bar process ends. A signal we sent ourselves, a bar
+// that lived long enough to be useful, and a bar that declined because another
+// instance already owns the lock all reset the count; a short-lived exit
 // escalates 15s, 30s, 60s ... up to five minutes.
-function nextPopupRetry({ failures = 0, uptimeMs = 0, signal = null, now: at = Date.now() } = {}) {
+function nextPopupRetry({ failures = 0, uptimeMs = 0, signal = null, code = null, now: at = Date.now() } = {}) {
   if (signal === "SIGTERM" || signal === "SIGINT") return { failures: 0, retryAt: 0 }
   if (uptimeMs >= POPUP_SHORT_LIVED_MS) return { failures: 0, retryAt: 0 }
+  if (code === LOCK_HELD_EXIT_CODE) {
+    // Somebody else is already drawing the bar. That is the wanted state, so
+    // the counter is reset and the next look is a slow, quiet one.
+    return { failures: 0, retryAt: at + LOCK_HELD_RETRY_MS }
+  }
   const consecutive = failures + 1
   const wait = Math.min(POPUP_BACKOFF_MAX_MS, POPUP_BACKOFF_BASE_MS * 2 ** (consecutive - 1))
   return { failures: consecutive, retryAt: at + wait }
@@ -159,29 +189,34 @@ function resolvePython() {
   return companions.popupPython
 }
 
-function listLinuxProcesses(root, names) {
+// Asynchronous on purpose: this runs on the server's event loop, and a
+// readdirSync plus one readFileSync per pid is a stall nobody asked for. The
+// scan happens every few seconds for the whole life of the process.
+async function listLinuxProcesses(root, names) {
   let entries
   try {
-    entries = readdirSync(root, { withFileTypes: true })
+    entries = await readdir(root, { withFileTypes: true })
   } catch {
     return null
   }
   const wanted = new Set(names)
   const found = []
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
-    try {
-      // /proc/<pid>/comm is capped at 15 characters, so it truncates
-      // "ai.opencode.desktop" to "ai.opencode.d" and never matches. The cmdline
-      // file carries the whole argv.
-      const raw = readFileSync(join(root, entry.name, "cmdline"), "utf8")
-      const argv0 = raw.split("\0")[0] ?? ""
-      const command = argv0.split(/[\\/]/).pop() ?? ""
-      if (wanted.has(command) || wanted.has(argv0)) found.push({ pid: Number(entry.name), command })
-    } catch {
-      // The process exited between listing and reading.
-    }
-  }
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) return
+      try {
+        // /proc/<pid>/comm is capped at 15 characters, so it truncates
+        // "ai.opencode.desktop" to "ai.opencode.d" and never matches. The
+        // cmdline file carries the whole argv.
+        const raw = await readFile(join(root, entry.name, "cmdline"), "utf8")
+        const argv0 = raw.split("\0")[0] ?? ""
+        const command = argv0.split(/[\\/]/).pop() ?? ""
+        if (wanted.has(command) || wanted.has(argv0)) found.push({ pid: Number(entry.name), command })
+      } catch {
+        // The process exited between listing and reading.
+      }
+    }),
+  )
   return found
 }
 
@@ -218,25 +253,33 @@ function runProcessListTool(command, args) {
 
 // Returns true when the app cannot be located, so an unknown platform keeps the
 // bar rather than hiding a measurement the user asked for.
-function scanDesktopProcess({
+async function scanDesktopProcess({
   platform = process.platform,
   procRoot = "/proc",
   names = DESKTOP_PROCESS_NAMES,
 } = {}) {
   if (platform === "linux") {
-    const found = listLinuxProcesses(procRoot, names)
+    const found = await listLinuxProcesses(procRoot, names)
     return found === null ? true : found.length > 0
   }
   return processListDecision(platform, names, runProcessListTool) ?? true
 }
 
 function desktopAppAlive() {
+  // The process list only decides anything for the Desktop app. A CLI or TUI
+  // session can never be hidden by it, so the scan is not worth running — and
+  // on Linux it means walking /proc.
+  if (process.env.OPENCODE_CLIENT !== "desktop") return true
   const cached = companions.desktopCheck
   const stamp = Date.now()
   if (cached && stamp - cached.at < DESKTOP_CHECK_TTL_MS) return cached.alive
-  const alive = scanDesktopProcess()
-  companions.desktopCheck = { at: stamp, alive }
-  return alive
+  companions.desktopCheck = { at: stamp, alive: true }
+  // Resolve outside the caller's turn: a scan that is still running must not
+  // make the caller guess, and the previous answer is good for a few seconds.
+  void scanDesktopProcess().then((alive) => {
+    companions.desktopCheck = { at: Date.now(), alive }
+  })
+  return true
 }
 
 function barExpectedFrom({ desktopEnv, desktopAlive, lastDesktopSeenAt, now }) {
@@ -323,9 +366,12 @@ function spawnBarProcess(runtime, build) {
   child.once("exit", (code, signal) => {
     if (companions.popup === child) companions.popup = null
     const uptimeMs = companions.popupStartedAt ? Date.now() - companions.popupStartedAt : 0
-    const retry = nextPopupRetry({ failures: companions.popupFailures, uptimeMs, signal })
+    const retry = nextPopupRetry({ failures: companions.popupFailures, uptimeMs, signal, code })
     companions.popupFailures = retry.failures
     companions.popupUnavailableUntil = retry.retryAt
+    // Another bar already owns the screen: that is the wanted state, and it is
+    // not worth a line in the log on every check.
+    if (code === LOCK_HELD_EXIT_CODE) return
     // Say why once the pattern repeats, so a machine that cannot draw the bar is
     // not a silent five second loop. Deeper retries already backed off to minutes.
     if (retry.failures >= 1 && retry.failures <= 4) {
@@ -362,8 +408,20 @@ function startPopup(runtime) {
     .catch(() => {})
 }
 
+// The status directory sits in a temporary directory, which on Linux is
+// world-writable and shared between users. Creating it 0700 keeps another local
+// account out of the measurement files; the mode is only applied when the
+// directory is created, so an existing one is left alone.
+async function ensureStatusDir() {
+  try {
+    await mkdir(STATUS_DIR, { recursive: true, mode: STATUS_DIR_MODE })
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error
+  }
+}
+
 async function writeJsonAtomic(path, value) {
-  await mkdir(STATUS_DIR, { recursive: true })
+  await ensureStatusDir()
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
     await writeFile(temporary, JSON.stringify(value), { encoding: "utf8", mode: 0o600 })
@@ -402,6 +460,10 @@ async function notePluginVersion() {
     updatedAt: now(),
     path: dirname(fileURLToPath(import.meta.url)),
   }
+  // The bar marks an announcement as seen in this same file. Carrying the
+  // marker over keeps a second instance of the plugin from resurrecting a notice
+  // the bar has already shown.
+  if (Number.isFinite(previous?.seenAt)) payload.seenAt = previous.seenAt
   await writeJsonAtomic(PLUGIN_VERSION_FILE, payload).catch(() => {})
   return { version, changed: true, previous: known }
 }
@@ -439,7 +501,7 @@ async function claimResponse(key) {
   const digest = createHash("sha256").update(key).digest("hex")
   const marker = join(STATUS_DIR, `response-${digest}.marker`)
   try {
-    await mkdir(STATUS_DIR, { recursive: true })
+    await ensureStatusDir()
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         const handle = await open(marker, "wx", 0o600)
@@ -468,12 +530,17 @@ async function claimResponse(key) {
 }
 
 async function withStorageLock(fn) {
-  await mkdir(STATUS_DIR, { recursive: true }).catch(() => {})
+  await ensureStatusDir().catch(() => {})
   const lockPath = join(STATUS_DIR, "storage.lock")
   // Five seconds of patience before the lock is considered abandoned. The path
   // stays fail-open on purpose: losing a measurement matters less than blocking
   // the plugin, but it only happens after this long wait, never immediately.
-  for (let attempt = 0; attempt < 250; attempt += 1) {
+  // The deadline sits past the TTL on purpose. When both expired at the same
+  // instant, a waiter could give up at the exact moment the holder was declared
+  // abandoned, and the two would then run the read-modify-write of the same
+  // records at once and lose one.
+  const deadline = now() + STORAGE_LOCK_TTL_MS + 2000
+  while (now() < deadline) {
     let handle
     try {
       handle = await open(lockPath, "wx", 0o600)
@@ -515,6 +582,29 @@ function eventTimestamp(event) {
   return created !== null && created > 0 ? created : now()
 }
 
+// A session's totals are one snapshot, not eight independent numbers. Ranking
+// whole snapshots is what keeps a reader from dividing a token count taken at
+// one moment by a stream time taken at another and calling the result a
+// measurement. `turns` only ever grows inside a session, so it is the primary
+// key, with the timestamp as the tie-break.
+function snapshotRank(values) {
+  if (!isRecord(values)) return null
+  const turns = numberOrNull(values.turns)
+  const updatedAt = typeof values.updatedAt === "string" ? Date.parse(values.updatedAt) : numberOrNull(values.updatedAt)
+  return [turns ?? -1, Number.isFinite(updatedAt) ? updatedAt : 0]
+}
+
+function newerSnapshot(current, candidate) {
+  if (!isRecord(candidate)) return current
+  if (!isRecord(current)) return candidate
+  const left = snapshotRank(current)
+  const right = snapshotRank(candidate)
+  if (!right) return current
+  if (!left) return candidate
+  if (right[0] !== left[0]) return right[0] > left[0] ? candidate : current
+  return right[1] >= left[1] ? candidate : current
+}
+
 function normalizeOptions(raw) {
   const requestedLimit = Number(raw?.historyLimit)
   const historyLimit = Number.isFinite(requestedLimit)
@@ -524,9 +614,94 @@ function normalizeOptions(raw) {
   return {
     enabled: raw?.enabled !== false,
     historyLimit,
-    log: raw?.log !== false,
+    // Off by default: one line per completed turn in somebody else's log file
+    // is noise, and the numbers are on the bar. Errors and version changes are
+    // printed whatever this says.
+    log: raw?.log === true,
     popup,
   }
+}
+
+// The event names this plugin depends on. Anything outside this list is counted
+// rather than dropped in silence: a renamed or removed event would otherwise
+// delete a measurement with no error anywhere, which is the one failure mode
+// that cannot be noticed from the outside.
+const HANDLED_TYPES = new Set([
+  "session.viewed",
+  "session.inbox.enqueued",
+  "session.inbox.delivered",
+  "session.compaction.started",
+  "session.compaction.ended",
+  "session.compaction.failed",
+  "session.execution.started",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+  "session.step.started",
+  "session.step.ended",
+  "session.step.failed",
+  "session.text.started",
+  "session.text.delta",
+  "session.text.ended",
+  "session.reasoning.started",
+  "session.reasoning.ended",
+  "session.reasoning.delta",
+  "session.usage.updated",
+  // The model writing a tool call's arguments. These are model output exactly
+  // like text is, and they are the only place their generation time is visible:
+  // a step's output tokens include its tool call, so ignoring these events left
+  // tokens in the numerator with no time in the denominator.
+  "session.tool.input.started",
+  "session.tool.input.delta",
+  "session.tool.input.ended",
+])
+// Known and deliberately not measured: synthetic inbox items, usage records and
+// single bookkeeping events are somebody else's business, and none of them is
+// model output.
+const IGNORED_TYPES = new Set([
+  "session.synthetic",
+  "session.usage.recorded",
+  "session.idle",
+  "session.metadata.updated",
+  "session.model.selected",
+  "session.agent.selected",
+  "session.retry.scheduled",
+  "session.step.streamed",
+  "session.compaction.delta",
+])
+// Whole families OpenCode emits around work this plugin does not measure: tool
+// execution (as opposed to session.tool.input.*, which is the model writing the
+// arguments), shells, skills and interface state. Naming the family keeps a new
+// event inside it from being reported as an unknown measurement event, while a
+// rename of an event this plugin does depend on still shows up as unknown.
+const IGNORED_PREFIXES = [
+  "session.tool.",
+  "session.shell.",
+  "session.skill.",
+  "session.tab.",
+  "session.form.",
+  "session.commands.",
+  "session.permission.",
+  "session.revert.",
+  "session.title.",
+  "session.child.",
+  "session.message.",
+  "session.pending.",
+  "session.instructions.",
+  "session.sidebar.",
+  "session.composer.",
+  "session.copy.",
+  "session.pin.",
+  "session.toggle.",
+  "session.page.",
+  "session.line.",
+  "session.half.",
+  "session.input.",
+  "session.new.",
+]
+
+function isIgnoredEventType(type) {
+  return IGNORED_TYPES.has(type) || IGNORED_PREFIXES.some((prefix) => type.startsWith(prefix))
 }
 
 function normalizeEvent(event) {
@@ -611,6 +786,9 @@ function createState(rawOptions) {
   const executions = new Set()
   const inboxTypes = new Map()
   const seenEventIDs = new Set()
+  const unknownEventTypes = new Map()
+  let unknownEventTotal = 0
+  let unknownLoggedAt = 0
   const ignoredMessageIDs = new Set()
   const completedResponseKeys = new Set()
   const closedTurns = new Map()
@@ -619,28 +797,62 @@ function createState(rawOptions) {
   let persistChain = Promise.resolve()
   let currentSession = { known: false, id: null }
 
-  function log(ctx, message) {
-    if (!options.log) return
-    const line = `[${PLUGIN_ID}] ${message}`
-    try {
-      console.log(line)
-    } catch {
-      // A missing console never blocks a measurement.
-    }
+  function writeLine(ctx, line, level) {
+    // One sink, not two: OpenCode's own logger when the host offers it, the
+    // console otherwise. Writing the same line to both duplicated every
+    // measurement in the log and in the terminal.
     const app = ctx?.app ?? ctx?.client?.app
     if (app && typeof app.log === "function") {
       try {
         void Promise.resolve(app.log({
-          body: {
-            service: PLUGIN_ID,
-            level: "info",
-            message: line,
-          },
+          body: { service: PLUGIN_ID, level, message: line },
         })).catch(() => {})
+        return
       } catch {
-        // Logging must never break the measurement path.
+        // Fall through to the console.
       }
     }
+    try {
+      if (level === "info") console.log(line)
+      else console.warn(line)
+    } catch {
+      // A missing console never blocks a measurement.
+    }
+  }
+
+  // The per-measurement line, off unless it was asked for.
+  function log(ctx, message) {
+    if (!options.log) return
+    writeLine(ctx, `[${PLUGIN_ID}] ${message}`, "info")
+  }
+
+  // Everything that says something is wrong, or that something changed. These
+  // ignore the `log` option, because a silent failure is the one outcome this
+  // plugin must not have.
+  function warn(ctx, message) {
+    writeLine(ctx, `[${PLUGIN_ID}] ${message}`, "warn")
+  }
+
+  function noteUnknownType(ctx, type) {
+    unknownEventTotal += 1
+    unknownEventTypes.set(type, (unknownEventTypes.get(type) ?? 0) + 1)
+    while (unknownEventTypes.size > UNKNOWN_TYPE_LIMIT) {
+      unknownEventTypes.delete(unknownEventTypes.keys().next().value)
+    }
+    // Once every few minutes at most, so a busy session cannot turn this into
+    // the noise it was introduced to avoid.
+    const stamp = now()
+    if (stamp - unknownLoggedAt < UNKNOWN_TYPE_LOG_INTERVAL_MS) return
+    unknownLoggedAt = stamp
+    warn(ctx, `${unknownEventTotal} event(s) of unknown type ignored: ${summarizeUnknownEvents()}`)
+  }
+
+  function summarizeUnknownEvents() {
+    return [...unknownEventTypes.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 5)
+      .map(([type, count]) => `${type}×${count}`)
+      .join(", ")
   }
 
   function publishCurrentSession() {
@@ -670,19 +882,37 @@ function createState(rawOptions) {
     try {
       const response = await storage.get(STORAGE_KEY)
       const stored = response?.data ?? response
-      if (!Array.isArray(stored?.records)) return
-      for (const record of stored.records) {
-        if (!isRecord(record) || typeof record.sessionID !== "string") continue
-        sessionTotals.set(record.sessionID, mergeSeededTotals(sessionTotals.get(record.sessionID), record))
+      if (Array.isArray(stored?.records)) {
+        for (const record of stored.records) {
+          if (!isRecord(record) || typeof record.sessionID !== "string") continue
+          sessionTotals.set(record.sessionID, mergeSeededTotals(sessionTotals.get(record.sessionID), record))
+        }
+        log(null, `loaded ${stored.records.length} saved measurements`)
       }
-      log(null, `loaded ${stored.records.length} saved measurements`)
     } catch {
       log(null, "could not load saved measurements; continuing with an empty history")
     }
+    // History is capped, so a rebuilt session can be behind the totals this or
+    // another instance already published. The totals file is the further-along
+    // record of the session, and starting from it is what stops a restart from
+    // walking a session's numbers — and its last-ten list — backwards.
+    try {
+      const raw = JSON.parse(await readFile(SESSION_TOTALS_FILE, "utf8"))
+      const sessions = isRecord(raw?.sessions) ? raw.sessions : {}
+      for (const [sessionID, snapshot] of Object.entries(sessions)) {
+        if (typeof sessionID !== "string" || !isRecord(snapshot)) continue
+        sessionTotals.set(sessionID, mergeSeededTotals(sessionTotals.get(sessionID), { sessionTotals: snapshot }))
+      }
+    } catch {
+      // No totals file yet (or it is unreadable): history alone is what there is.
+    }
+    // Publish what was just rebuilt, so the bar gets the merged view — including
+    // the last-ten list history supplied — without waiting for a new response.
+    void publishSessionTotals().catch(() => {})
   }
 
-  function mergeSeededTotals(existing, record) {
-    const totals = existing ?? {
+  function emptyTotals() {
+    return {
       turns: 0,
       steps: 0,
       outputTokens: 0,
@@ -690,17 +920,50 @@ function createState(rawOptions) {
       generatedTokens: 0,
       activeStreamMs: 0,
       tokensPerSecond: null,
+      // The rates of the most recent responses, oldest first, so the bar can
+      // average the last ten instead of the whole session. A response without a
+      // rate contributes nothing rather than a zero.
+      recentRates: [],
       updatedAt: null,
     }
+  }
+
+  function pushRecentRate(totals, rate) {
+    if (!Number.isFinite(rate) || rate <= 0) return
+    const rounded = Math.round(rate * 10) / 10
+    if (totals.recentRates[totals.recentRates.length - 1] === rounded) {
+      // The same response counted twice (a replayed event) is not a new turn.
+      return
+    }
+    totals.recentRates.push(rounded)
+    while (totals.recentRates.length > RECENT_RATE_COUNT) totals.recentRates.shift()
+  }
+
+  function readRecentRates(value) {
+    if (!Array.isArray(value)) return []
+    return value
+      .filter((rate) => Number.isFinite(rate) && rate > 0)
+      .map((rate) => Math.round(rate * 10) / 10)
+      .slice(-RECENT_RATE_COUNT)
+  }
+
+  function mergeSeededTotals(existing, record) {
+    const totals = existing ?? emptyTotals()
     const snapshot = isRecord(record.sessionTotals) ? record.sessionTotals : null
     if (snapshot) {
-      totals.turns = Math.max(totals.turns, numberOrNull(snapshot.turns) ?? 0)
-      totals.steps = Math.max(totals.steps, numberOrNull(snapshot.steps) ?? 0)
-      for (const field of ["outputTokens", "reasoningTokens", "generatedTokens", "activeStreamMs"]) {
-        totals[field] = Math.max(totals[field], numberOrNull(snapshot[field]) ?? 0)
+      // Keep one snapshot whole. Taking the maximum of each field separately
+      // can build a pair that never coexisted, and every reader divides one by
+      // the other.
+      const winner = newerSnapshot(totals, snapshot)
+      if (winner === snapshot) {
+        for (const field of ["turns", "steps", "outputTokens", "reasoningTokens", "generatedTokens", "activeStreamMs"]) {
+          totals[field] = numberOrNull(snapshot[field]) ?? 0
+        }
+        totals.tokensPerSecond = numberOrNull(snapshot.tokensPerSecond) ?? null
+        const recent = readRecentRates(snapshot.recentRates)
+        if (recent.length > 0) totals.recentRates = recent
+        totals.updatedAt = typeof snapshot.updatedAt === "string" ? snapshot.updatedAt : totals.updatedAt
       }
-      totals.tokensPerSecond = numberOrNull(snapshot.tokensPerSecond) ?? totals.tokensPerSecond
-      totals.updatedAt = typeof snapshot.updatedAt === "string" ? snapshot.updatedAt : totals.updatedAt
     } else {
       totals.turns += 1
       totals.steps += Number.isFinite(record.stepCount) ? record.stepCount : 0
@@ -715,6 +978,12 @@ function createState(rawOptions) {
         : totals.tokensPerSecond
       totals.updatedAt = typeof record.completedAt === "string" ? record.completedAt : totals.updatedAt
     }
+    // Deliberately no pushRecentRate here. A rate measured before the tool-call
+    // arguments were counted as model time is a different quantity — that is the
+    // 4686 tok/s that started all this — and mixing the two would put a number
+    // nobody can defend in front of the user. The list starts with the first
+    // response measured the current way; a snapshot that already carries a list
+    // keeps it.
     return totals
   }
 
@@ -803,11 +1072,15 @@ function createState(rawOptions) {
       reasoningCharacterCount: 0,
       deltaCount: 0,
       reasoningDeltaCount: 0,
+      toolArgCharacters: 0,
+      toolArgDeltaCount: 0,
+      toolInputs: new Map(),
       snapshotLengths: new Map(),
       spans: new Map(),
       stepCount: 0,
       stepOutputTokens: 0,
       stepReasoningTokens: 0,
+      agentStats: new Map(),
       messageOutputTokens: null,
       usageBaseline: null,
       usageLatest: null,
@@ -885,6 +1158,14 @@ function createState(rawOptions) {
       turn.spans.set(key, { first: at, last: at })
       return
     }
+    // A long silence under one message id is an interrupted stream that came
+    // back, not the model thinking. Counting the gap as streaming time is what
+    // makes a reconnect look like a slow model, so the span restarts instead.
+    if (at - span.last > STREAM_GAP_LIMIT_MS) {
+      span.first = at
+      span.last = at
+      return
+    }
     span.last = at
   }
 
@@ -940,6 +1221,34 @@ function createState(rawOptions) {
     updateSpan(turn, value.assistantMessageID, receivedAt)
   }
 
+  // The model writing out a tool call's arguments. These events carry the same
+  // assistantMessageID as the text of the step they belong to, so they extend
+  // that message's span instead of starting a new one: a step is text and
+  // thinking and tool call together, and the step's tokens cover all three.
+  function consumeToolInput(turn, value, receivedAt) {
+    turn.hasEvidence = true
+    if (turn.firstTokenAt === null) turn.firstTokenAt = receivedAt
+    turn.lastAnyAt = receivedAt
+    const key = typeof value.id === "string" && value.id ? value.id : (value.assistantMessageID ?? "unknown")
+    const previous = turn.toolInputs.get(key) ?? 0
+    const delta = typeof value.delta === "string" ? value.delta : ""
+    // `ended` carries the finished input as `text`, which is what a tool call
+    // whose arguments never streamed has instead of a series of deltas.
+    const characters = delta.length > 0
+      ? previous + [...delta].length
+      : typeof value.text === "string"
+        ? Math.max(previous, [...value.text].length)
+        : previous
+    if (characters !== previous) {
+      turn.toolInputs.set(key, characters)
+      turn.toolArgCharacters += characters - previous
+    }
+    if (delta.length > 0) {
+      turn.toolArgDeltaCount += 1
+    }
+    updateSpan(turn, value.assistantMessageID, receivedAt)
+  }
+
   function addStepTokens(turn, tokens) {
     if (!turn || !isRecord(tokens)) return
     const output = numberOrNull(tokens.output)
@@ -947,6 +1256,17 @@ function createState(rawOptions) {
     turn.stepCount += 1
     if (output !== null) turn.stepOutputTokens += output
     if (reasoning !== null) turn.stepReasoningTokens += reasoning
+    // Kept per agent, because a turn that ran a subagent has steps and tokens
+    // that belong to somebody else and a single total hides that.
+    const key = turn.agent ?? "unknown"
+    let stats = turn.agentStats.get(key)
+    if (!stats) {
+      stats = { steps: 0, outputTokens: 0, reasoningTokens: 0 }
+      turn.agentStats.set(key, stats)
+    }
+    stats.steps += 1
+    if (output !== null) stats.outputTokens += output
+    if (reasoning !== null) stats.reasoningTokens += reasoning
   }
 
   function readUsageTokens(value) {
@@ -990,16 +1310,7 @@ function createState(rawOptions) {
   function updateSessionTotals(sessionID, record) {
     let totals = sessionTotals.get(sessionID)
     if (!totals) {
-      totals = {
-        turns: 0,
-        steps: 0,
-        outputTokens: 0,
-        reasoningTokens: 0,
-        generatedTokens: 0,
-        activeStreamMs: 0,
-        tokensPerSecond: null,
-        updatedAt: null,
-      }
+      totals = emptyTotals()
       sessionTotals.set(sessionID, totals)
     }
     totals.turns += 1
@@ -1013,18 +1324,37 @@ function createState(rawOptions) {
     totals.tokensPerSecond = totals.activeStreamMs > 0 && totals.generatedTokens > 0
       ? totals.generatedTokens / (totals.activeStreamMs / 1000)
       : totals.tokensPerSecond
+    pushRecentRate(totals, numberOrNull(record.tokensPerSecond) ?? NaN)
     totals.updatedAt = record.completedAt
     // Eviction is by least recently updated, not least recently created, so an
     // active long-running session is not dropped while an idle newer one stays.
     sessionTotals.delete(sessionID)
     sessionTotals.set(sessionID, totals)
     while (sessionTotals.size > 50) sessionTotals.delete(sessionTotals.values().next().value)
-    return { ...totals }
+    return { ...totals, recentRates: [...totals.recentRates] }
   }
 
+  // OpenCode runs setup once per project directory, so several instances of this
+  // plugin share one totals file. Writing only what this instance knows would
+  // erase the other projects' sessions from the file the bar reads, so the
+  // on-disk sessions are merged in first and the newest snapshot per session
+  // wins whole.
   async function publishSessionTotals() {
     const sessions = {}
     for (const [sessionID, totals] of sessionTotals) sessions[sessionID] = totals
+    let existing = null
+    try {
+      const record = JSON.parse(await readFile(SESSION_TOTALS_FILE, "utf8"))
+      if (isRecord(record?.sessions)) existing = record.sessions
+    } catch {
+      existing = null
+    }
+    if (existing) {
+      for (const [sessionID, snapshot] of Object.entries(existing)) {
+        if (!Object.hasOwn(sessions, sessionID)) sessions[sessionID] = snapshot
+        else sessions[sessionID] = newerSnapshot(sessions[sessionID], snapshot)
+      }
+    }
     await writeJsonAtomic(SESSION_TOTALS_FILE, {
       version: 1,
       sessions,
@@ -1073,7 +1403,7 @@ function createState(rawOptions) {
     }
     return enqueueFinish(sessionID, ctx, completedAt, turn)
       .catch((error) => {
-        log(ctx, `could not finish measurement: ${String(error)}`)
+        warn(ctx, `could not finish measurement: ${String(error)}`)
       })
       .finally(() => {
         finishing.delete(turn)
@@ -1099,7 +1429,7 @@ function createState(rawOptions) {
 
     const tokens = tokenCounts(turn)
     const generatedTokens = tokens.output === null ? null : tokens.output + (tokens.reasoning ?? 0)
-    const activeStreamMs = spanTotal(turn)
+    const measuredStreamMs = spanTotal(turn)
     const firstToLastMs = turn.firstTokenAt === null || turn.lastTextAt === null
       ? null
       : turn.lastTextAt - turn.firstTokenAt
@@ -1108,6 +1438,25 @@ function createState(rawOptions) {
       : turn.lastAnyAt !== null
         ? turn.lastAnyAt - turn.startedAt
         : null
+    // A response that arrives in one piece has a stream span of zero, so it used
+    // to show no rate at all — the quick replies a person most wants to see. When
+    // the whole response is a single message there is no tool execution to leave
+    // out of the denominator, so the wall time of that one message is the same
+    // quantity and is used instead. The step count has to agree: a turn that ran
+    // tools has step tokens whose generation is not inside that wall time at all,
+    // and dividing them by it is how a rate nobody could defend gets printed.
+    const singleMessage = turn.assistantMessageIDs.size <= 1 && turn.stepCount <= 1
+    let activeStreamMs = measuredStreamMs
+    let rateSource = measuredStreamMs !== null ? "stream-span" : "unavailable"
+    if (activeStreamMs === null && singleMessage) {
+      if (firstToLastMs !== null && firstToLastMs > 0) {
+        activeStreamMs = firstToLastMs
+        rateSource = "first-to-last"
+      } else if (totalMs !== null && totalMs > 0) {
+        activeStreamMs = totalMs
+        rateSource = "single-message-total"
+      }
+    }
     const streamSeconds = activeStreamMs !== null && activeStreamMs > 0 ? activeStreamMs / 1000 : null
     const totalSeconds = totalMs !== null && totalMs > 0 ? totalMs / 1000 : null
     const record = {
@@ -1135,11 +1484,16 @@ function createState(rawOptions) {
       outputTokenSource: tokens.source,
       deltaCount: turn.deltaCount,
       reasoningDeltaCount: turn.reasoningDeltaCount,
+      toolArgCharacters: turn.toolArgCharacters,
+      toolArgDeltaCount: turn.toolArgDeltaCount,
       stepCount: turn.stepCount,
+      agents: Object.fromEntries(turn.agentStats),
+      rateSource,
+      unknownEventTypes: summarizeUnknownEvents(),
       observedCharactersPerSecond: streamSeconds !== null
-        ? turn.characterCount / streamSeconds
+        ? (turn.characterCount + turn.toolArgCharacters) / streamSeconds
         : firstToLastMs !== null && firstToLastMs > 0
-          ? turn.characterCount / (firstToLastMs / 1000)
+          ? (turn.characterCount + turn.toolArgCharacters) / (firstToLastMs / 1000)
           : null,
       tokensPerSecond: generatedTokens === null || streamSeconds === null
         ? null
@@ -1155,16 +1509,17 @@ function createState(rawOptions) {
       ctx,
       `session=${record.sessionID} start=${record.startSource} first_token=${formatMs(record.firstTokenMs)} ` +
         `first_to_last=${formatMs(record.firstToLastMs)} total=${formatMs(record.totalMs)} ` +
-        `stream=${formatMs(record.activeStreamMs)} chars=${record.characterCount} deltas=${record.deltaCount} ` +
+        `stream=${formatMs(record.activeStreamMs)} (${record.rateSource}) chars=${record.characterCount} deltas=${record.deltaCount} ` +
         `tokens=${record.outputTokens ?? "n/a"}+${record.reasoningTokens ?? "n/a"} (${record.outputTokenSource}) ` +
-        `session_turns=${record.sessionTotals.turns} session_tps=${record.sessionTotals.tokensPerSecond?.toFixed?.(1) ?? "n/a"}`,
+        `session_turns=${record.sessionTotals.turns} session_tps=${record.sessionTotals.tokensPerSecond?.toFixed?.(1) ?? "n/a"}` +
+        (unknownEventTotal > 0 ? ` unknown_events=${unknownEventTotal} [${record.unknownEventTypes}]` : ""),
     )
     if (options.popup) {
       void publishStatus(record).catch((error) => {
-        log(ctx, `could not publish popup status: ${String(error)}`)
+        warn(ctx, `could not publish popup status: ${String(error)}`)
       })
       void publishSessionTotals().catch((error) => {
-        log(ctx, `could not publish session totals: ${String(error)}`)
+        warn(ctx, `could not publish session totals: ${String(error)}`)
       })
     }
   }
@@ -1180,6 +1535,10 @@ function createState(rawOptions) {
     const receivedAt = eventTimestamp(event)
     const { type, value } = normalizeEvent(event)
     if (!type || !isRecord(value)) return
+    if (!HANDLED_TYPES.has(type) && !isIgnoredEventType(type)) {
+      noteUnknownType(ctx, type)
+      return
+    }
     const sessionID = readSessionID(value)
     if (!sessionID) return
 
@@ -1242,6 +1601,14 @@ function createState(rawOptions) {
     }
     if (type === "session.synthetic" || type === "session.usage.recorded") return
     if (type === "session.execution.started") {
+      // Two executions producing at once in one session means parallel work or
+      // a subagent, not one turn. Merging them reported a single turn that never
+      // happened and mixed one agent's tokens into another's total, so the first
+      // is closed and the second starts clean. complete() is called first
+      // because it clears the session's own bookkeeping, including the
+      // executions entry added below.
+      const open = active.get(sessionID)
+      if (open && open.hasEvidence) void complete(sessionID, ctx, receivedAt)
       executions.add(sessionID)
       while (executions.size > 200) executions.delete(executions.values().next().value)
       const turn = begin(sessionID, undefined, receivedAt, "execution")
@@ -1320,6 +1687,18 @@ function createState(rawOptions) {
       consumeReasoningDelta(turn, value, receivedAt)
       return
     }
+    if (
+      type === "session.tool.input.started" ||
+      type === "session.tool.input.delta" ||
+      type === "session.tool.input.ended"
+    ) {
+      if (compactingSessions.has(sessionID)) return
+      const turn = ensureTurn(sessionID, value.assistantMessageID, receivedAt, "tool-input")
+      if (!turn) return
+      noteAssistantMessage(turn, value.assistantMessageID)
+      consumeToolInput(turn, value, receivedAt)
+      return
+    }
     if (type === "session.usage.updated") {
       const turn = active.get(sessionID)
       const usage = readUsageTokens(value)
@@ -1341,10 +1720,12 @@ function createState(rawOptions) {
     },
     load,
     log,
+    warn,
     begin,
     handle,
     setCurrentSessionId,
     refreshCurrentSession,
+    unknownEventTypes: summarizeUnknownEvents,
   }
 }
 
@@ -1353,6 +1734,14 @@ export const vitalsInternals = {
   DESKTOP_PROCESS_NAMES,
   DESKTOP_MISSING_GRACE_MS,
   RESPONSE_MARKER_TTL_MS,
+  LOCK_HELD_EXIT_CODE,
+  LOCK_HELD_RETRY_MS,
+  STREAM_GAP_LIMIT_MS,
+  HANDLED_TYPES,
+  IGNORED_TYPES,
+  IGNORED_PREFIXES,
+  isIgnoredEventType,
+  RECENT_RATE_COUNT,
   scanDesktopProcess,
   processListDecision,
   barExpectedFrom,
@@ -1365,6 +1754,9 @@ export const vitalsInternals = {
   notePluginVersion,
   claimResponse,
   pruneResponseMarkers,
+  snapshotRank,
+  newerSnapshot,
+  normalizeOptions,
 }
 
 export default {
@@ -1411,10 +1803,13 @@ export default {
     markerTimer.unref?.()
     runtime.markerTimer = markerTimer
     const version = await notePluginVersion()
-    state.log(ctx, version.changed ? `updated ${version.previous ?? "none"} -> ${version.version}` : `loaded ${version.version}`)
+    // The version line is rare and it is how a person finds out whether the
+    // copy they are reading about is the copy that is running, so it is printed
+    // whether or not per-turn logging is on.
+    if (version.changed) state.warn(ctx, `updated ${version.previous ?? "none"} -> ${version.version}`)
 
     if (!ctx.event?.subscribe) {
-      state.log(ctx, "event subscription unavailable; latency monitoring is disabled")
+      state.warn(ctx, "event subscription unavailable; measurement is disabled")
       return cleanup
     }
 
@@ -1428,11 +1823,13 @@ export default {
             state.handle(event, ctx)
           } catch (error) {
             malformed += 1
-            if (malformed <= 5) state.log(ctx, `ignored a malformed event: ${String(error)}`)
+            // A hostile event must be visible when it happens: the subscription
+            // survives it, so nothing else would ever mention it.
+            if (malformed <= 5) state.warn(ctx, `ignored a malformed event: ${String(error)}`)
           }
         }
       } catch (error) {
-        if (!controller.signal.aborted) state.log(ctx, `event subscription stopped: ${String(error)}`)
+        if (!controller.signal.aborted) state.warn(ctx, `event subscription stopped: ${String(error)}`)
       }
     })()
 
@@ -1445,7 +1842,7 @@ export default {
           state.begin(sessionID, messageID, now(), "hook")
         })
       } catch (error) {
-        state.log(ctx, `prompt hook unavailable; relying on session events: ${String(error)}`)
+        state.warn(ctx, `prompt hook unavailable; relying on session events: ${String(error)}`)
       }
     }
 

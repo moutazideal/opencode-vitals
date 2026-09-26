@@ -80,6 +80,7 @@ async function run(events, options = {}) {
     options: { popup: false, log: false, ...options.pluginOptions },
     location: { directory: `/tmp/opencode/latency-audit-${Math.random()}` },
     storage,
+    ...(options.app ? { app: options.app } : {}),
     event: {
       subscribe({ signal }) {
         return (async function* () {
@@ -468,7 +469,14 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("seeded totals continue turns", record.sessionTotals?.turns === 6, JSON.stringify(record.sessionTotals))
   check("seeded totals continue steps", record.sessionTotals?.steps === 51, JSON.stringify(record.sessionTotals))
   check("seeded totals sum tokens", record.sessionTotals?.generatedTokens === 510, JSON.stringify(record.sessionTotals))
-  check("seeded totals keep stream", record.sessionTotals?.activeStreamMs === 1000, JSON.stringify(record.sessionTotals))
+  // The seeded stream time is carried, not dropped, and this response's own
+  // stream is added to it. What must not happen is tokens from one moment being
+  // divided by a stream time from another: 510 tokens over 1100ms of stream.
+  check("seeded totals keep stream", record.sessionTotals?.activeStreamMs === 1100, JSON.stringify(record.sessionTotals))
+  check("seeded rate is one snapshot", Math.abs((record.sessionTotals?.tokensPerSecond ?? 0) - 510 / 1.1) < 0.01, JSON.stringify(record.sessionTotals))
+  // One message, one delta: no measured stream span, so the wall time of that
+  // single message is what the rate is taken from.
+  check("a one-piece answer still gets a rate", record.rateSource === "single-message-total" && record.tokensPerSecond > 0, JSON.stringify([record.rateSource, record.tokensPerSecond]))
   cleanup()
 }
 
@@ -515,12 +523,14 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   addProcess("101", "/usr/lib/systemd/systemd")
   addProcess("102", "/opt/OpenCode/ai.opencode.desktop")
   addProcess("104", ["/opt/OpenCode/ai.opencode.desktop", "--type=zygote", "--no-zygote-sandbox"])
-  check("desktop process found", vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc }) === true)
-  check("truncated comm alone is not trusted", vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc, names: ["ai.opencode.d"] }) === false)
+  // The /proc walk is asynchronous: a plugin that blocked the event loop on one
+  // directory read per pid would stall every other event OpenCode delivers.
+  check("desktop process found", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc }) === true)
+  check("truncated comm alone is not trusted", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc, names: ["ai.opencode.d"] }) === false)
   addProcess("103", "/usr/bin/bash")
-  check("other processes ignored", vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc, names: ["nothing-here"] }) === false)
-  check("unreadable proc root keeps bar", vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: join(fakeProc, "missing") }) === true)
-  check("unknown platform keeps bar", vitalsInternals.scanDesktopProcess({ platform: "aix" }) === true)
+  check("other processes ignored", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc, names: ["nothing-here"] }) === false)
+  check("unreadable proc root keeps bar", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: join(fakeProc, "missing") }) === true)
+  check("unknown platform keeps bar", await vitalsInternals.scanDesktopProcess({ platform: "aix" }) === true)
 
   const now = 1_800_000_000_000
   const grace = vitalsInternals.DESKTOP_MISSING_GRACE_MS
@@ -980,6 +990,362 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     check("a closed pipe is quiet", piped.status === 0 && !(piped.stderr ?? "").includes("EPIPE"), JSON.stringify({ status: piped.status, stderr: (piped.stderr ?? "").slice(0, 80) }))
   }
   rmSync(bin, { recursive: true, force: true })
+}
+
+// 32. Session totals are one snapshot, ranked and replaced whole.
+{
+  const { snapshotRank, newerSnapshot } = vitalsInternals
+  const older = { turns: 2, generatedTokens: 20, activeStreamMs: 1000, updatedAt: "2026-01-01T00:00:00.000Z" }
+  const newer = { turns: 3, generatedTokens: 30, activeStreamMs: 1500, updatedAt: "2026-01-02T00:00:00.000Z" }
+  check("more turns is further along", newerSnapshot(older, newer) === newer)
+  check("fewer turns never wins", newerSnapshot(newer, older) === newer)
+  // Equal turn counts: the timestamp is the tie-break, so a second write of the
+  // same turn count still replaces the record.
+  const sameTurns = { ...older, generatedTokens: 40, updatedAt: "2026-01-03T00:00:00.000Z" }
+  check("the timestamp breaks a turn tie", newerSnapshot(older, sameTurns) === sameTurns)
+  check("a tie without a timestamp keeps the incumbent", newerSnapshot(sameTurns, { ...older, updatedAt: undefined }) === sameTurns)
+  check("junk is not a snapshot", snapshotRank("nope") === null && snapshotRank(null) === null, JSON.stringify(snapshotRank("nope")))
+  check("a rank is comparable", JSON.stringify(snapshotRank(newer)) > JSON.stringify(snapshotRank(older)), JSON.stringify([snapshotRank(older), snapshotRank(newer)]))
+}
+
+// 33. Logging is opt-in; a warning is not.
+{
+  const quiet = vitalsInternals.normalizeOptions({})
+  check("log is off by default", quiet.log === false && quiet.enabled === true && quiet.popup === true, JSON.stringify(quiet))
+  check("log can be turned on", vitalsInternals.normalizeOptions({ log: true }).log === true)
+  check("only true turns logging on", vitalsInternals.normalizeOptions({ log: "yes" }).log === false && vitalsInternals.normalizeOptions({ log: 1 }).log === false)
+  check("popup can still be turned off", vitalsInternals.normalizeOptions({ popup: false }).popup === false)
+}
+
+// 34. A stream that stops for half a minute and comes back was interrupted, so
+// the silence must not land in the denominator of tok/s.
+{
+  const gapSession = `ses_gap${unique}`
+  const t = base
+  const events = [
+    envelope("session.execution.started", { sessionID: gapSession }, t),
+    envelope("session.text.started", { sessionID: gapSession, assistantMessageID: "msg_gap", ordinal: 0 }, t + 10),
+    envelope("session.text.delta", { sessionID: gapSession, assistantMessageID: "msg_gap", ordinal: 0, delta: "start" }, t + 100),
+    envelope("session.text.delta", { sessionID: gapSession, assistantMessageID: "msg_gap", ordinal: 0, delta: "resumed" }, t + 100 + 40_000),
+    envelope("session.text.delta", { sessionID: gapSession, assistantMessageID: "msg_gap", ordinal: 0, delta: "!" }, t + 100 + 41_000),
+    envelope("session.step.ended", { sessionID: gapSession, assistantMessageID: "msg_gap", tokens: { output: 10, reasoning: 0, cache: {} } }, t + 100 + 41_100),
+    envelope("session.execution.succeeded", { sessionID: gapSession }, t + 100 + 42_000),
+  ]
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.sessionID === gapSession)
+  check("the silence is not stream time", record.activeStreamMs === 1000, JSON.stringify(record.activeStreamMs))
+  check("an interrupted stream still has a rate", record.rateSource === "stream-span" && Math.abs((record.tokensPerSecond ?? 0) - 10) < 0.001, JSON.stringify([record.rateSource, record.tokensPerSecond]))
+  check("the wall clock still sees the whole turn", record.totalMs >= 41_000, JSON.stringify(record.totalMs))
+  cleanup()
+}
+
+// 35. An event this plugin does not know is counted and reported, never dropped
+// in silence — a renamed event would otherwise delete measurements invisibly.
+{
+  const unknownSession = `ses_unknown${unique}`
+  const events = [
+    envelope("session.execution.started", { sessionID: unknownSession }, base),
+    envelope("session.text.delta", { sessionID: unknownSession, assistantMessageID: "msg_unk", ordinal: 0, delta: "hi" }, base + 100),
+    envelope("session.step.ended", { sessionID: unknownSession, assistantMessageID: "msg_unk", tokens: { output: 4 } }, base + 150),
+    envelope("session.renamed.event", { sessionID: unknownSession }, base + 160),
+    envelope("session.renamed.event", { sessionID: unknownSession }, base + 170),
+    envelope("session.execution.succeeded", { sessionID: unknownSession }, base + 200),
+  ]
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.sessionID === unknownSession)
+  check("an unknown event is counted on the record", record.unknownEventTypes === "session.renamed.event×2", JSON.stringify(record.unknownEventTypes))
+  check("an unknown event does not stop the measurement", record.messageID === "msg_unk" && record.outputTokens === 4, JSON.stringify([record.messageID, record.outputTokens]))
+  check("unknown types are declared as a set", vitalsInternals.HANDLED_TYPES.has("session.text.delta") && !vitalsInternals.HANDLED_TYPES.has("session.renamed.event"))
+  cleanup()
+}
+
+// 36. Two executions running at once in one session are two turns. Merging them
+// reported a single turn that never happened and mixed one agent's tokens into
+// another's total.
+{
+  const parallelSession = `ses_parallel${unique}`
+  const events = [
+    envelope("session.execution.started", { sessionID: parallelSession }, base),
+    envelope("session.text.started", { sessionID: parallelSession, assistantMessageID: "msg_p1", ordinal: 0 }, base + 10),
+    envelope("session.text.delta", { sessionID: parallelSession, assistantMessageID: "msg_p1", ordinal: 0, delta: "first answer" }, base + 100),
+    envelope("session.execution.started", { sessionID: parallelSession }, base + 200),
+    envelope("session.text.started", { sessionID: parallelSession, assistantMessageID: "msg_p2", ordinal: 0 }, base + 210),
+    envelope("session.text.delta", { sessionID: parallelSession, assistantMessageID: "msg_p2", ordinal: 0, delta: "second answer" }, base + 300),
+    envelope("session.step.ended", { sessionID: parallelSession, assistantMessageID: "msg_p2", tokens: { output: 3 } }, base + 400),
+    envelope("session.execution.succeeded", { sessionID: parallelSession }, base + 500),
+  ]
+  const { storage, cleanup } = await run(events)
+  const firstRecord = await waitForRecord(storage, (item) => item.messageID === "msg_p1")
+  const secondRecord = await waitForRecord(storage, (item) => item.messageID === "msg_p2")
+  check("the first execution is measured on its own", firstRecord.characterCount === 12, JSON.stringify(firstRecord.characterCount))
+  check("the second execution is measured on its own", secondRecord.characterCount === 13 && secondRecord.outputTokens === 3, JSON.stringify([secondRecord.characterCount, secondRecord.outputTokens]))
+  check("parallel work is two turns, not one", firstRecord.id !== secondRecord.id, JSON.stringify([firstRecord.id, secondRecord.id]))
+  check("session turns count both", secondRecord.sessionTotals?.turns === 2, JSON.stringify(secondRecord.sessionTotals))
+  cleanup()
+}
+
+// 37. The status directory sits in a shared temporary directory, so it belongs
+// to its owner alone.
+{
+  const statusDir = join(SUITE_TMP, "opencode-latency-monitor")
+  const mode = statSync(statusDir).mode & 0o777
+  check("the status directory is private", mode === 0o700, mode.toString(8))
+}
+
+// 38. The bar records that it showed a version notice in the same file the
+// plugin writes. Carrying that marker over keeps a second plugin instance from
+// announcing the same version all over again.
+{
+  const sandbox = mkdtempSync(join(tmpdir(), "vitals-notice-"))
+  const isolated = await withTmpDir(sandbox, () => import(`../index.js?notice=${Date.now()}`))
+  const versionFile = join(sandbox, "opencode-latency-monitor", "plugin-version.json")
+  mkdirSync(join(sandbox, "opencode-latency-monitor"), { recursive: true })
+  const own = isolated.vitalsInternals.readOwnVersion()
+
+  writeFileSync(versionFile, JSON.stringify({ version: "0.0.1-old", previous: null, updatedAt: 1_000, seenAt: 7_000 }))
+  const upgraded = await isolated.vitalsInternals.notePluginVersion()
+  check("a new version is recorded", upgraded.changed === true && upgraded.previous === "0.0.1-old", JSON.stringify(upgraded))
+  let stored = JSON.parse(readFileSync(versionFile, "utf8"))
+  check("a shown notice is not resurrected", stored.seenAt === 7_000 && stored.version === own, JSON.stringify(stored))
+
+  stored.seenAt = 9_000
+  writeFileSync(versionFile, JSON.stringify(stored))
+  const unchanged = await isolated.vitalsInternals.notePluginVersion()
+  check("the same version changes nothing", unchanged.changed === false, JSON.stringify(unchanged))
+  const after = JSON.parse(readFileSync(versionFile, "utf8"))
+  check("a rewrite of the same version leaves the marker", after.seenAt === 9_000, JSON.stringify(after))
+  rmSync(sandbox, { recursive: true, force: true })
+}
+
+// 39. A bar that declined because another instance already owns the lock is the
+// wanted state: no backoff escalation, no failure counted.
+{
+  const at = 2_000_000
+  const held = vitalsInternals.nextPopupRetry({ failures: 4, uptimeMs: 0, signal: null, code: vitalsInternals.LOCK_HELD_EXIT_CODE, now: at })
+  check("a held lock is not a crash", held.failures === 0, JSON.stringify(held))
+  check("the next look is a slow one", held.retryAt === at + vitalsInternals.LOCK_HELD_RETRY_MS, JSON.stringify(held))
+  const afterHeld = vitalsInternals.nextPopupRetry({ failures: held.failures, uptimeMs: 0, signal: null, now: at })
+  check("the failure count really reset", afterHeld.failures === 1 && afterHeld.retryAt === at + 15_000, JSON.stringify(afterHeld))
+}
+
+// 40. Per-turn logging is off unless it is asked for; a warning is not.
+{
+  const lines = []
+  const app = { log: (entry) => { lines.push(entry?.body ?? {}) } }
+  const noisySession = `ses_log${unique}`
+  const events = [
+    envelope("session.execution.started", { sessionID: noisySession }, base),
+    envelope("session.text.delta", { sessionID: noisySession, assistantMessageID: "msg_log", ordinal: 0, delta: "hi" }, base + 100),
+    envelope("session.step.ended", { sessionID: noisySession, assistantMessageID: "msg_log", tokens: { output: 2 } }, base + 150),
+    envelope("session.something.new", { sessionID: noisySession }, base + 160),
+    envelope("session.execution.succeeded", { sessionID: noisySession }, base + 200),
+  ]
+  const { storage, cleanup } = await run(events, { app })
+  const record = await waitForRecord(storage, (item) => item.sessionID === noisySession)
+  await wait(50)
+  check("a measurement is not logged by default", !lines.some((line) => line.level === "info"), JSON.stringify(lines))
+  check("a warning is logged whatever the option says", lines.some((line) => line.level === "warn" && String(line.message).includes("unknown type")), JSON.stringify(lines))
+  check("the warning names the plugin", lines.every((line) => String(line.service ?? "").startsWith("opencode-vitals")), JSON.stringify(lines))
+  check("the measurement itself was not silenced", record.messageID === "msg_log", JSON.stringify(record.messageID))
+  cleanup()
+
+  const loudLines = []
+  const loudApp = { log: (entry) => { loudLines.push(entry?.body ?? {}) } }
+  // A different session and message: the response marker for the first run
+  // already exists, and a second claim of the same response is correctly
+  // refused — which would also refuse the log line this half of the test is
+  // about.
+  const loudSession = `ses_logloud${unique}`
+  const loudEvents = [
+    envelope("session.execution.started", { sessionID: loudSession }, base),
+    envelope("session.text.delta", { sessionID: loudSession, assistantMessageID: "msg_log_loud", ordinal: 0, delta: "hi" }, base + 100),
+    envelope("session.step.ended", { sessionID: loudSession, assistantMessageID: "msg_log_loud", tokens: { output: 2 } }, base + 150),
+    envelope("session.execution.succeeded", { sessionID: loudSession }, base + 200),
+  ]
+  const loud = await run(loudEvents, { app: loudApp, pluginOptions: { log: true } })
+  await waitForRecord(loud.storage, (item) => item.sessionID === loudSession)
+  await wait(50)
+  check("logging can be turned on", loudLines.some((line) => line.level === "info" && String(line.message).includes("session=")), JSON.stringify(loudLines))
+  loud.cleanup()
+}
+
+// 41. A step's output is text, thinking and tool call together, and its tokens
+// cover all three. Counting the tool call's tokens while ignoring the time the
+// model spent writing them is what printed 4686 tok/s on a real turn.
+{
+  const toolSession = `ses_tool${unique}`
+  const t = base
+  const events = [
+    envelope("session.execution.started", { sessionID: toolSession }, t),
+    envelope("session.step.started", { sessionID: toolSession, assistantMessageID: "msg_tool", agent: "build" }, t + 10),
+    envelope("session.text.delta", { sessionID: toolSession, assistantMessageID: "msg_tool", ordinal: 0, delta: "Let me " }, t + 100),
+    envelope("session.text.delta", { sessionID: toolSession, assistantMessageID: "msg_tool", ordinal: 0, delta: "check" }, t + 150),
+    envelope("session.tool.input.started", { sessionID: toolSession, assistantMessageID: "msg_tool", id: "call_1", name: "bash" }, t + 200),
+    envelope("session.tool.input.delta", { sessionID: toolSession, assistantMessageID: "msg_tool", id: "call_1", delta: '{"comm' }, t + 300),
+    envelope("session.tool.input.delta", { sessionID: toolSession, assistantMessageID: "msg_tool", id: "call_1", delta: 'and":"ls"}' }, t + 900),
+    envelope("session.tool.input.ended", { sessionID: toolSession, assistantMessageID: "msg_tool", id: "call_1", text: '{"command":"ls"}' }, t + 950),
+    envelope("session.tool.called", { sessionID: toolSession, assistantMessageID: "msg_tool", id: "call_1", input: { command: "ls" }, executed: true, state: {} }, t + 1000),
+    envelope("session.step.ended", { sessionID: toolSession, assistantMessageID: "msg_tool", tokens: { output: 200, reasoning: 0, cache: {} } }, t + 1200),
+    envelope("session.execution.succeeded", { sessionID: toolSession }, t + 1300),
+  ]
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.sessionID === toolSession)
+  // Text streamed for 50ms, then the model wrote the call's arguments for
+  // another 750ms. Both are the model generating, so both are in the span.
+  check("writing a tool call counts as model time", record.activeStreamMs === 850, JSON.stringify(record.activeStreamMs))
+  check("the rate is not the tokens divided by the text alone", Math.abs((record.tokensPerSecond ?? 0) - 200 / 0.85) < 0.01, JSON.stringify(record.tokensPerSecond))
+  check("the arguments are counted as characters", record.toolArgCharacters === 16 && record.toolArgDeltaCount === 2, JSON.stringify([record.toolArgCharacters, record.toolArgDeltaCount]))
+  check("the text count stays text", record.characterCount === 12, JSON.stringify(record.characterCount))
+  check("characters per second covers what the model wrote", Math.abs((record.observedCharactersPerSecond ?? 0) - 28 / 0.85) < 0.01, JSON.stringify(record.observedCharactersPerSecond))
+  check("running the tool is not measured as model time", record.unknownEventTypes === "", JSON.stringify(record.unknownEventTypes))
+  cleanup()
+}
+
+// 42. A step whose whole output is a tool call has no text and no thinking at
+// all. That used to be a turn with no measurable stream, so its tokens made the
+// average meaningless.
+{
+  const onlySession = `ses_onlytool${unique}`
+  const events = [
+    envelope("session.execution.started", { sessionID: onlySession }, base),
+    envelope("session.step.started", { sessionID: onlySession, assistantMessageID: "msg_only", agent: "build" }, base + 10),
+    envelope("session.tool.input.delta", { sessionID: onlySession, assistantMessageID: "msg_only", id: "call_2", delta: '{"path":"a.txt"}' }, base + 100),
+    envelope("session.tool.input.delta", { sessionID: onlySession, assistantMessageID: "msg_only", id: "call_2", delta: '{"more":true}' }, base + 600),
+    envelope("session.tool.input.ended", { sessionID: onlySession, assistantMessageID: "msg_only", id: "call_2", text: '{"path":"a.txt","more":true}' }, base + 650),
+    envelope("session.step.ended", { sessionID: onlySession, assistantMessageID: "msg_only", tokens: { output: 150, reasoning: 0, cache: {} } }, base + 700),
+    envelope("session.execution.succeeded", { sessionID: onlySession }, base + 800),
+  ]
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.sessionID === onlySession)
+  check("a tool call alone is model output", record.activeStreamMs === 550 && record.rateSource === "stream-span", JSON.stringify([record.activeStreamMs, record.rateSource]))
+  check("a tool call alone gets a real rate", Math.abs((record.tokensPerSecond ?? 0) - 150 / 0.55) < 0.01, JSON.stringify(record.tokensPerSecond))
+  check("the first token is when the model started writing it", record.firstTokenMs === 100, JSON.stringify(record.firstTokenMs))
+  check("no text was invented for it", record.characterCount === 0 && record.deltaCount === 0, JSON.stringify([record.characterCount, record.deltaCount]))
+  cleanup()
+}
+
+// 43. The wall time of a single message is only a rate when that message is the
+// whole turn. A turn that ran tools gets no rate instead of a flattering one.
+{
+  const gateSession = `ses_gate${unique}`
+  const multiStep = [
+    envelope("session.execution.started", { sessionID: gateSession }, base),
+    envelope("session.step.started", { sessionID: gateSession, assistantMessageID: "msg_gate", ordinal: 0 }, base + 10),
+    envelope("session.text.delta", { sessionID: gateSession, assistantMessageID: "msg_gate", ordinal: 0, delta: "one piece" }, base + 100),
+    envelope("session.step.ended", { sessionID: gateSession, assistantMessageID: "msg_gate", tokens: { output: 40 } }, base + 150),
+    envelope("session.step.ended", { sessionID: gateSession, assistantMessageID: "msg_gate2", tokens: { output: 60 } }, base + 60_000),
+    envelope("session.execution.succeeded", { sessionID: gateSession }, base + 60_100),
+  ]
+  const gated = await run(multiStep)
+  const gatedRecord = await waitForRecord(gated.storage, (item) => item.sessionID === gateSession)
+  check("no wall-clock rate for a tool-using turn", gatedRecord.tokensPerSecond === null && gatedRecord.activeStreamMs === null, JSON.stringify([gatedRecord.tokensPerSecond, gatedRecord.activeStreamMs]))
+  check("and the record says why", gatedRecord.rateSource === "unavailable", gatedRecord.rateSource)
+  check("the tokens are still reported", gatedRecord.generatedTokens === 100, JSON.stringify(gatedRecord.generatedTokens))
+  gated.cleanup()
+
+  const singleSession = `ses_gateone${unique}`
+  const singleStep = [
+    envelope("session.execution.started", { sessionID: singleSession }, base),
+    envelope("session.step.started", { sessionID: singleSession, assistantMessageID: "msg_gateone", ordinal: 0 }, base + 10),
+    envelope("session.text.delta", { sessionID: singleSession, assistantMessageID: "msg_gateone", ordinal: 0, delta: "one piece" }, base + 100),
+    envelope("session.step.ended", { sessionID: singleSession, assistantMessageID: "msg_gateone", tokens: { output: 40 } }, base + 150),
+    envelope("session.execution.succeeded", { sessionID: singleSession }, base + 200),
+  ]
+  const single = await run(singleStep)
+  const singleRecord = await waitForRecord(single.storage, (item) => item.sessionID === singleSession)
+  check("a one-piece one-step answer still gets its wall-clock rate", singleRecord.rateSource === "single-message-total" && singleRecord.activeStreamMs === 100, JSON.stringify([singleRecord.rateSource, singleRecord.activeStreamMs]))
+  single.cleanup()
+}
+
+// 44. The bar's second number: the average of the last ten responses, kept in
+// the session totals so it survives a reload and travels with the snapshot.
+{
+  const recentSession = `ses_recent${unique}`
+  const events = []
+  for (let index = 1; index <= 12; index += 1) {
+    const at = base + index * 1000
+    events.push(
+      envelope("session.execution.started", { sessionID: recentSession }, at),
+      envelope("session.text.delta", { sessionID: recentSession, assistantMessageID: `msg_r${index}`, ordinal: 0, delta: "x" }, at + 100),
+      envelope("session.step.ended", { sessionID: recentSession, assistantMessageID: `msg_r${index}`, tokens: { output: index * 10 } }, at + 200),
+      envelope("session.execution.succeeded", { sessionID: recentSession }, at + 300),
+    )
+  }
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.assistantMessageID === "msg_r12" || item.messageID === "msg_r12")
+  const rates = record.sessionTotals?.recentRates ?? []
+  check("each response leaves its rate in the session totals", record.sessionTotals?.turns === 12 && rates.length === 10, JSON.stringify([record.sessionTotals?.turns, rates.length]))
+  // Each turn was one short message, so its rate is its tokens over 100ms:
+  // 10..120 tokens => 100..1200 tok/s. The oldest two fell off the end.
+  check("only the last ten are kept", Math.abs(rates[0] - 300) < 0.01 && Math.abs(rates[9] - 1200) < 0.01, JSON.stringify(rates))
+  check("the rates are newest last", rates.every((rate, index) => index === 0 || rate > rates[index - 1]), JSON.stringify(rates))
+  cleanup()
+}
+
+// 45. A response with no honest rate is skipped instead of counted as zero, so
+// it cannot drag the last-ten average down.
+{
+  const mixedSession = `ses_mixed${unique}`
+  const events = [
+    envelope("session.execution.started", { sessionID: mixedSession }, base),
+    envelope("session.text.delta", { sessionID: mixedSession, assistantMessageID: "msg_m1", ordinal: 0, delta: "first" }, base + 100),
+    envelope("session.step.ended", { sessionID: mixedSession, assistantMessageID: "msg_m1", tokens: { output: 50 } }, base + 150),
+    envelope("session.execution.succeeded", { sessionID: mixedSession }, base + 200),
+    // Two steps, no measurable stream: the record reports no rate at all.
+    envelope("session.execution.started", { sessionID: mixedSession }, base + 1000),
+    envelope("session.step.ended", { sessionID: mixedSession, assistantMessageID: "msg_m2", tokens: { output: 70 } }, base + 60_000),
+    envelope("session.step.ended", { sessionID: mixedSession, assistantMessageID: "msg_m3", tokens: { output: 30 } }, base + 61_000),
+    envelope("session.execution.succeeded", { sessionID: mixedSession }, base + 62_000),
+  ]
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.sessionTotals?.turns === 2)
+  const rates = record.sessionTotals?.recentRates ?? []
+  check("a rate-less response is not a zero", rates.length === 1, JSON.stringify(rates))
+  check("its tokens are still in the session", record.sessionTotals?.generatedTokens === 150, JSON.stringify(record.sessionTotals))
+  cleanup()
+}
+
+// 46. A restart resumes from the totals file, not only from a capped history.
+// History keeps twenty records across all sessions, so a plugin that rebuilt
+// its view from that alone came back behind the totals it had already
+// published — and the bar kept showing the older snapshot, last-ten list and
+// all, until the rebuilt count caught up.
+{
+  const resumeSession = `ses_resume${unique}`
+  const totalsPath = join(SUITE_TMP, "opencode-latency-monitor", "session-totals.json")
+  const previousTotals = existsSync(totalsPath) ? readFileSync(totalsPath, "utf8") : null
+  writeFileSync(totalsPath, JSON.stringify({
+    version: 1,
+    sessions: {
+      [resumeSession]: {
+        turns: 7,
+        steps: 90,
+        outputTokens: 7000,
+        reasoningTokens: 1000,
+        generatedTokens: 8000,
+        activeStreamMs: 40000,
+        tokensPerSecond: 200,
+        recentRates: [150, 250],
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    },
+  }))
+  const events = [
+    envelope("session.execution.started", { sessionID: resumeSession }, base),
+    envelope("session.text.started", { sessionID: resumeSession, assistantMessageID: "msg_resume", ordinal: 0 }, base + 10),
+    envelope("session.text.delta", { sessionID: resumeSession, assistantMessageID: "msg_resume", ordinal: 0, delta: "back" }, base + 100),
+    envelope("session.step.ended", { sessionID: resumeSession, assistantMessageID: "msg_resume", tokens: { output: 30 } }, base + 150),
+    envelope("session.execution.succeeded", { sessionID: resumeSession }, base + 200),
+  ]
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.sessionID === resumeSession)
+  check("a restart continues the published totals", record.sessionTotals?.turns === 8 && record.sessionTotals?.steps === 91, JSON.stringify(record.sessionTotals))
+  check("the tokens of the previous run are still there", record.sessionTotals?.generatedTokens === 8030, JSON.stringify(record.sessionTotals?.generatedTokens))
+  const resumedRates = record.sessionTotals?.recentRates ?? []
+  check("the last-ten list resumes from the file", resumedRates.length === 3 && resumedRates[0] === 150 && resumedRates[1] === 250, JSON.stringify(resumedRates))
+  cleanup()
+  if (previousTotals !== null) writeFileSync(totalsPath, previousTotals)
+  else rmSync(totalsPath, { force: true })
 }
 
 for (const result of results) {

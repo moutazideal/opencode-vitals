@@ -76,13 +76,32 @@ try:
     check("format_tps integer", bar.format_tps(274.3) == "274", bar.format_tps(274.3))
     check("format_tps decimal", bar.format_tps(12.5) == "12.5", bar.format_tps(12.5))
     check("format_tps none", bar.format_tps(None) == "–", bar.format_tps(None))
+    # Four characters is what one line of a small card can hold next to the live
+    # reading; "4.7k" says the same thing as "4686" and fits.
+    check("format_tps keeps four digits short", bar.format_tps(4686.4) == "4.7k", bar.format_tps(4686.4))
+    check("format_tps rounds thousands", bar.format_tps(12000) == "12k", bar.format_tps(12000))
+    check("format_tps keeps three digits exact", bar.format_tps(999) == "999", bar.format_tps(999))
     check("format_count negative", bar.format_count(-4) == 0, bar.format_count(-4))
     totals = {}
     bar.merge_totals(totals, {"ses_a": {"turns": 3, "steps": 9, "generatedTokens": 100, "activeStreamMs": 1000}})
-    bar.merge_totals(totals, {"ses_a": {"turns": 1, "steps": 2, "generatedTokens": 50, "activeStreamMs": 2000}})
-    check("merge keeps max turns", totals["ses_a"]["turns"] == 3, totals["ses_a"])
-    check("merge keeps max stream", totals["ses_a"]["activeStreamMs"] == 2000, totals["ses_a"])
-    check("rate recomputed", abs((bar.totals_rate(totals["ses_a"]) or 0) - 50) < 0.001, bar.totals_rate(totals["ses_a"]))
+    check("merge takes the snapshot whole", totals["ses_a"]["turns"] == 3 and totals["ses_a"]["generatedTokens"] == 100, totals["ses_a"])
+    check("rate from one snapshot", abs((bar.totals_rate(totals["ses_a"]) or 0) - 100) < 0.001, bar.totals_rate(totals["ses_a"]))
+    # A later, further-along snapshot replaces the old one entirely. Taking the
+    # maximum of each field separately used to build totals no session ever had:
+    # 100 tokens from one turn over 2000ms of stream time from another.
+    bar.merge_totals(totals, {"ses_a": {"turns": 4, "steps": 11, "generatedTokens": 150, "activeStreamMs": 2000}})
+    check("a newer snapshot wins whole", totals["ses_a"]["turns"] == 4 and totals["ses_a"]["activeStreamMs"] == 2000, totals["ses_a"])
+    check("no field mixing in the rate", abs((bar.totals_rate(totals["ses_a"]) or 0) - 75) < 0.001, bar.totals_rate(totals["ses_a"]))
+    # An older snapshot must not walk the numbers backwards.
+    bar.merge_totals(totals, {"ses_a": {"turns": 1, "steps": 2, "generatedTokens": 10, "activeStreamMs": 100}})
+    check("an older snapshot is ignored", totals["ses_a"]["turns"] == 4 and totals["ses_a"]["generatedTokens"] == 150, totals["ses_a"])
+    # The same turn count with a newer timestamp is the newer snapshot.
+    stamped = {}
+    bar.merge_totals(stamped, {"ses_b": {"turns": 2, "generatedTokens": 20, "activeStreamMs": 1000, "updatedAt": "2026-01-01T00:00:00.000Z"}})
+    bar.merge_totals(stamped, {"ses_b": {"turns": 2, "generatedTokens": 60, "activeStreamMs": 1000, "updatedAt": "2026-01-02T00:00:00.000Z"}})
+    check("the timestamp breaks a turn tie", stamped["ses_b"]["generatedTokens"] == 60, stamped["ses_b"])
+    check("snapshot rank orders by turns", bar.snapshot_rank({"turns": 9}) > bar.snapshot_rank({"turns": 2}))
+    check("snapshot rank rejects junk", bar.snapshot_rank("nope") is None)
 
     # stale current session is ignored
     current_file = work / "current.json"
@@ -210,6 +229,173 @@ try:
     blind.supported = False
     check("another platform keeps the bar", blind.poll(now_ms=2000) is None)
 
+    # The search for the window spawns one xprop per candidate, so a window that
+    # is not there must not be searched for on every beat, and a window that has
+    # been rejected once must never be asked about again.
+    calls = []
+
+    def counting_probe(args):
+        calls.append(tuple(args))
+        return outputs.get(tuple(args))
+
+    searching = bar.DesktopWindow(probe=counting_probe, interval_ms=0)
+    searching.poll(now_ms=1000)
+    first_pass = len(calls)
+    check("the first search does look", first_pass > 0, first_pass)
+    check("a rejected window is remembered", "0x11" in searching.rejected, sorted(searching.rejected))
+    calls.clear()
+    searching.window_id = None
+    searching._find_windows(["0x11", "0x22"])
+    check("a remembered window is not probed again", not [c for c in calls if c == ("-id", "0x11", "WM_CLASS")], calls)
+    check("a fresh window still is", [c for c in calls if c == ("-id", "0x22", "WM_CLASS")], calls)
+
+    # With no window at all the search is on its own, slower beat: an absent
+    # window must not cost a process per second, but it must still be looked for
+    # so one that appears later is caught.
+    search_calls = []
+
+    def absent_probe(args):
+        search_calls.append(tuple(args))
+        if tuple(args) == ("-root", "_NET_CLIENT_LIST"):
+            return "_NET_CLIENT_LIST(WINDOW): window id # 0x99"
+        return None
+
+    absent = bar.DesktopWindow(probe=absent_probe, interval_ms=0)
+    absent.poll(now_ms=1000)
+    look = len(search_calls)
+    check("an absent window is looked for at all", look > 0, look)
+    absent.poll(now_ms=2000)
+    check("an absent window is not searched every beat", len(search_calls) == look, (look, len(search_calls)))
+    absent.poll(now_ms=1000 + bar.WINDOW_SEARCH_INTERVAL_MS)
+    check("an absent window is searched again later", len(search_calls) > look, (look, len(search_calls)))
+    check("the search beat is slower than the state beat", bar.WINDOW_SEARCH_INTERVAL_MS > bar.WINDOW_CHECK_INTERVAL_MS, (bar.WINDOW_SEARCH_INTERVAL_MS, bar.WINDOW_CHECK_INTERVAL_MS))
+
+    # --- focus and covering: two more reasons the bar leaves the screen
+    focus_outputs = {
+        ("-root", "_NET_CLIENT_LIST"): listing,
+        ("-id", "0x11", "WM_CLASS"): 'WM_CLASS(STRING) = "google-chrome", "Google-chrome"',
+        ("-id", "0x22", "WM_CLASS"): 'WM_CLASS(STRING) = "ai.opencode.desktop", "ai.opencode.desktop"',
+        ("-id", "0x22", "_NET_WM_STATE"): "_NET_WM_STATE_MAXIMIZED_HORZ",
+        ("-root", "_NET_ACTIVE_WINDOW"): "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x11",
+    }
+
+    def focus_probe(args):
+        return focus_outputs.get(tuple(args))
+
+    follow = bar.DesktopWindow(probe=focus_probe, interval_ms=0, geometry=lambda window: None)
+    follow.poll(now_ms=1000)
+    check("another program taking focus hides the bar", follow.should_hide() is True, (follow.focused, follow.occluded))
+    check("the app is known not to be focused", follow.focused is False, follow.focused)
+    focus_outputs[("-root", "_NET_ACTIVE_WINDOW")] = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x22"
+    follow.poll(now_ms=2000)
+    check("coming back to the app shows the bar", follow.should_hide() is False, follow.focused)
+    follow.own_window_id = "0x77"
+    focus_outputs[("-root", "_NET_ACTIVE_WINDOW")] = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x77"
+    follow.poll(now_ms=3000)
+    check("clicking the bar is not leaving the app", follow.should_hide() is False and follow.focused is True, follow.focused)
+    # Tk reports the child it draws in, the window manager tracks the parent, and
+    # the parent is what is named as active the moment the bar is clicked. The
+    # two are matched up once by the window's title.
+    parent_outputs = dict(focus_outputs)
+    parent_outputs[("-root", "_NET_CLIENT_LIST")] = "_NET_CLIENT_LIST(WINDOW): window id # 0x22, 0x88"
+    parent_outputs[("-id", "0x22", "WM_CLASS")] = 'WM_CLASS(STRING) = "ai.opencode.desktop", "ai.opencode.desktop"'
+    parent_outputs[("-id", "0x88", "_NET_WM_NAME")] = '_NET_WM_NAME(UTF8_STRING) = "OpenCode Vitals"'
+    parent_outputs[("-id", "0x22", "_NET_WM_NAME")] = '_NET_WM_NAME(UTF8_STRING) = "OpenCode"'
+    parent_outputs[("-id", "0x88", "WM_CLASS")] = 'WM_CLASS(STRING) = "tk #2", "Tk"'
+    parent_outputs[("-root", "_NET_ACTIVE_WINDOW")] = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x88"
+
+    def parent_probe(args):
+        return parent_outputs.get(tuple(args))
+
+    clicked = bar.DesktopWindow(probe=parent_probe, interval_ms=0, own_window_id="0x89", own_title="OpenCode Vitals")
+    clicked.poll(now_ms=1000)
+    check("the bar's own managed window is found by title", clicked.own_client_id == "0x88", clicked.own_client_id)
+    check("a click on the bar keeps the bar", clicked.should_hide() is False and clicked.focused is True, (clicked.focused, clicked.own_client_id))
+    check("the bar is not mistaken for the app", clicked.window_id == "0x22", clicked.window_id)
+    parent_outputs[("-root", "_NET_ACTIVE_WINDOW")] = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x11"
+    clicked.poll(now_ms=2000)
+    check("leaving the bar still hides it", clicked.should_hide() is True, clicked.focused)
+    # Nothing focused at all (the desktop itself is showing) is not a reason to
+    # hide anything, and a switch can turn the whole behaviour off.
+    focus_outputs[("-root", "_NET_ACTIVE_WINDOW")] = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x0"
+    follow.poll(now_ms=4000)
+    check("an unfocused desktop keeps the bar", follow.should_hide() is False, follow.focused)
+    focus_outputs[("-root", "_NET_ACTIVE_WINDOW")] = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x11"
+    quiet_focus = bar.DesktopWindow(probe=focus_probe, interval_ms=0, hide_unfocused=False)
+    quiet_focus.poll(now_ms=1000)
+    check("focus following can be turned off", quiet_focus.should_hide() is False, quiet_focus.focused)
+    # A CLI or TUI session has no OpenCode window to follow: focus elsewhere in
+    # that case is simply the terminal the user is working in, and the bar stays.
+    no_window_outputs = {("-root", "_NET_CLIENT_LIST"): "_NET_CLIENT_LIST(WINDOW): window id # 0x11"}
+    no_window = bar.DesktopWindow(probe=lambda args: no_window_outputs.get(tuple(args)), interval_ms=0)
+    no_window.poll(now_ms=1000)
+    check("no OpenCode window means nothing to follow", no_window.should_hide() is None, (no_window.window_id, no_window.focused))
+
+    # Covered by another window: focus stays in OpenCode, a browser is simply on
+    # top of it. The window server is asked for rectangles, and only when the app
+    # is the one being worked in.
+    stack_outputs = dict(focus_outputs)
+    stack_outputs[("-root", "_NET_ACTIVE_WINDOW")] = "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x22"
+    stack_outputs[("-root", "_NET_CLIENT_LIST_STACKING")] = "_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x22, 0x11"
+    rects = {"0x22": (0, 0, 1000, 800), "0x11": (0, 0, 1000, 800)}
+
+    def stack_probe(args):
+        return stack_outputs.get(tuple(args))
+
+    def stack_geometry(window):
+        return rects.get(window)
+
+    covered = bar.DesktopWindow(probe=stack_probe, interval_ms=0, geometry=stack_geometry)
+    covered.poll(now_ms=1000)
+    check("a covering window hides the bar", covered.should_hide() is True, covered.occluded)
+    rects["0x11"] = (0, 0, 100, 100)
+    covered.poll(now_ms=1000 + bar.OCCLUSION_INTERVAL_MS)
+    check("a small window does not hide the bar", covered.should_hide() is False, covered.occluded)
+    rects["0x11"] = (0, 0, 1000, 800)
+    stack_outputs[("-id", "0x11", "_NET_WM_STATE")] = "_NET_WM_STATE_HIDDEN"
+    covered.poll(now_ms=1000 + 2 * bar.OCCLUSION_INTERVAL_MS)
+    check("a minimized window covers nothing", covered.should_hide() is False, covered.occluded)
+    del stack_outputs[("-id", "0x11", "_NET_WM_STATE")]
+    # Geometry is the expensive question, so it is asked on its own slower beat.
+    geometry_calls = []
+
+    def counting_geometry(window):
+        geometry_calls.append(window)
+        return rects.get(window)
+
+    measured = bar.DesktopWindow(probe=stack_probe, interval_ms=0, geometry=counting_geometry)
+    measured.poll(now_ms=1000)
+    first_measure = len(geometry_calls)
+    measured.poll(now_ms=1100)
+    check("geometry is not asked every beat", len(geometry_calls) == first_measure, (first_measure, len(geometry_calls)))
+    measured.poll(now_ms=1000 + bar.OCCLUSION_INTERVAL_MS)
+    check("geometry is asked again later", len(geometry_calls) > first_measure, len(geometry_calls))
+    measured.supported = False
+    check("no display keeps the bar", measured.poll(now_ms=9000) is None)
+    check("parse xwininfo reads the rectangle", bar.parse_xwininfo(
+        "  Absolute upper-left X:  120\n  Absolute upper-left Y:  40\n  Width: 800\n  Height: 600\n"
+    ) == (120, 40, 800, 600))
+    check("a broken xwininfo report is refused", bar.parse_xwininfo("Width: 800") is None)
+    check("coverage is a fraction of the target", abs(bar.covered_fraction((0, 0, 50, 100), (0, 0, 100, 100)) - 0.5) < 0.001)
+    check("no overlap is no coverage", bar.covered_fraction((200, 200, 10, 10), (0, 0, 100, 100)) == 0.0)
+    check("the coverage bar is a real fraction", 0.0 < bar.OCCLUSION_COVERAGE < 1.0, bar.OCCLUSION_COVERAGE)
+
+    # Declining because another bar owns the screen is the wanted state, and it
+    # carries its own exit code so the plugin cannot mistake it for a crash.
+    check("the lock-held exit code is its own", bar.LOCK_HELD_EXIT_CODE == 6, bar.LOCK_HELD_EXIT_CODE)
+    lock_only = work / "held.lock"
+    lock_only.write_text(json.dumps({"pid": 0, "build": 1.0}), encoding="utf-8")
+    lock_only.unlink()
+    holder_lock = work / "second.lock"
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        holder_lock.write_text(json.dumps({"pid": running.pid, "build": bar.build_token()}), encoding="utf-8")
+        bar.LOCK_ATTEMPTS, bar.LOCK_DELAY_SECONDS = 2, 0.01
+        check("a live same-revision bar holds the lock", bar.acquire_instance(holder_lock, bar.build_token()) is False)
+    finally:
+        running.terminate()
+        running.wait(timeout=5)
+
     # --- rendering ------------------------------------------------------------
     status = work / "latest.json"
     totals_file = work / "session-totals.json"
@@ -224,7 +410,8 @@ try:
     current_file.write_text(json.dumps({"available": True, "sessionID": session_id, "observedAt": int(time.time() * 1000)}), encoding="utf-8")
     totals_file.write_text(json.dumps({"version": 1, "sessions": {session_id: {"turns": 12, "steps": 260, "generatedTokens": 200000, "activeStreamMs": 500000}}}), encoding="utf-8")
 
-    ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "absent-drafts.sqlite", work / "ui-version.json")
+    scale_file = work / "scale.json"
+    ui = bar.Bar(status, current_file, totals_file, best_file, position, 0, work / "absent-drafts.sqlite", work / "ui-version.json", scale_file)
     ui.poll()
     ui.root.update()
 
@@ -233,9 +420,18 @@ try:
     class FakeWindow:
         def __init__(self):
             self.hidden = None
+            self.focused = None
+            self.occluded = None
 
         def poll(self, now_ms=None):
             return self.hidden
+
+        def should_hide(self):
+            if self.hidden is True or self.focused is False or self.occluded is True:
+                return True
+            if self.hidden is None and self.focused is None and self.occluded is None:
+                return None
+            return False
 
     fake_window = FakeWindow()
     ui.desktop_window = fake_window
@@ -247,6 +443,21 @@ try:
     ui.poll()
     ui.root.update()
     check("the bar returns when OpenCode is restored", ui.withdrawn is False and ui.root.winfo_viewable() == 1, (ui.withdrawn, ui.root.winfo_viewable()))
+    # The same machinery covers the other two reasons: the user moved to another
+    # program, or another window is simply covering the app.
+    fake_window.focused = False
+    ui.poll()
+    ui.root.update()
+    check("the bar leaves when another program takes focus", ui.withdrawn is True and ui.root.winfo_viewable() == 0, ui.withdrawn)
+    fake_window.focused = True
+    fake_window.occluded = True
+    ui.poll()
+    ui.root.update()
+    check("the bar stays away while the app is covered", ui.withdrawn is True, ui.withdrawn)
+    fake_window.occluded = False
+    ui.poll()
+    ui.root.update()
+    check("the bar comes back when the app is visible again", ui.withdrawn is False and ui.root.winfo_viewable() == 1, ui.withdrawn)
 
     def texts():
         return texts_of(ui)
@@ -283,16 +494,16 @@ try:
     check("nothing measured renders zeros and a dash", shows(blank_ui, "0", "turns") and shows(blank_ui, "0", "steps") and shows(blank_ui, "–", "tok/s"), " | ".join(texts_of(blank_ui)))
     blank_ui.shutdown()
 
-    # click on the × minimizes, click on the mini square restores
+    # click on the × collapses, click on the mini square restores
     ui.on_press(Event(x=ui.width - 10, y=ui.height / 2))
     ui.root.update()
-    check("close click minimizes", ui.minimized is True)
+    check("close click collapses", ui.collapsed is True)
     check("mini size", ui.root.winfo_width() == bar.MINI_WIDTH and ui.root.winfo_height() == bar.MINI_HEIGHT, (ui.root.winfo_width(), ui.root.winfo_height()))
     check("mini shows tps", "400" in " | ".join(texts()), " | ".join(texts()))
     ui.on_press(Event(x=10, y=10, x_root=100, y_root=100))
     ui.on_release(Event(x=10, y=10, x_root=100, y_root=100))
     ui.root.update()
-    check("mini click restores", ui.minimized is False)
+    check("mini click restores", ui.collapsed is False)
 
     # dragging moves the window and persists the position
     before = (ui.root.winfo_x(), ui.root.winfo_y())
@@ -310,6 +521,85 @@ try:
     ui.poll()
     ui.root.update()
     check("bar follows totals updates", shows(ui, "20", "turns") and shows(ui, "600", "tok/s"), " | ".join(texts()))
+
+    # The last-ten reading: the mean of the last ten responses, next to the
+    # session average it must not be mistaken for. One response is not an
+    # average, and a response with no honest rate is skipped rather than zeroed.
+    def write_totals(**overrides):
+        write_totals.stamp += 1
+        payload = {
+            "turns": 20,
+            "steps": 300,
+            "generatedTokens": 300000,
+            "activeStreamMs": 500000,
+            "updatedAt": f"2026-09-26T18:00:{write_totals.stamp:02d}.000Z",
+        }
+        payload.update(overrides)
+        totals_file.write_text(json.dumps({"version": 1, "sessions": {session_id: payload}}), encoding="utf-8")
+        ui.render_key = None
+        ui.poll()
+        ui.root.update()
+
+    write_totals.stamp = 0
+
+    check("no last-ten reading without rates", bar.totals_recent_rate({"recentRates": []}) is None)
+    check("one response is not an average", bar.totals_recent_rate({"recentRates": [400]}) is None)
+    check("the mean of the last ten responses", bar.totals_recent_rate({"recentRates": [400, 200]}) == 300)
+    check("a rate-less response is not a zero", bar.totals_recent_rate({"recentRates": [400, None, "x", 200]}) == 300)
+    check("totals without rates report none", bar.totals_recent_rate({"turns": 3}) is None and bar.totals_recent_rate(None) is None)
+    write_totals()
+    check("no last-ten reading is drawn without rates", "last10" not in texts(), " | ".join(texts()))
+    write_totals(recentRates=[400, 500])
+    check("the last-ten reading is drawn", shows(ui, "600", "tok/s", "·", "450", "last10"), " | ".join(texts()))
+    write_totals(recentRates=[400, 200, 900])
+    check("the average stays the session average", shows(ui, "600", "tok/s"), " | ".join(texts()))
+    check("the last-ten reading follows its own list", shows(ui, "·", "500", "last10"), " | ".join(texts()))
+
+    # --- resizing: the bar is the user's to size -------------------------------
+    check("the bar starts at its base size", (ui.width, ui.height) == (bar.NORMAL_WIDTH, bar.NORMAL_HEIGHT), (ui.width, ui.height))
+    check("scale is clamped at the top", bar.clamp_scale(99.0) == bar.MAX_SCALE, bar.clamp_scale(99.0))
+    check("scale is clamped at the bottom", bar.clamp_scale(0.01) == bar.MIN_SCALE, bar.clamp_scale(0.01))
+    check("nonsense scale falls back to one", bar.clamp_scale("big") == 1.0 and bar.clamp_scale(True) == 1.0)
+    ui.set_scale(1.5)
+    ui.root.update()
+    check("the window grows with the scale", (ui.width, ui.height) == (round(bar.NORMAL_WIDTH * 1.5), round(bar.NORMAL_HEIGHT * 1.5)), (ui.width, ui.height))
+    check("the text grows with it", ui.font_value.cget("size") > 12, ui.font_value.cget("size"))
+    check("the size is remembered", bar.load_saved_scale(scale_file) == 1.5, bar.load_saved_scale(scale_file))
+    text_items = [item for item in ui.canvas.find_all() if ui.canvas.type(item) == "text"]
+    right = max(ui.canvas.bbox(item)[2] for item in text_items)
+    bottom = max(ui.canvas.bbox(item)[3] for item in text_items)
+    close_left = ui.width - ui.px(15) - ui.px(8)
+    check("the content still fits the card", right <= close_left and bottom <= ui.height, (right, close_left, bottom, ui.height))
+    ui.on_wheel(Event(), 1)
+    check("the wheel steps the size up", abs(ui.scale - 1.6) < 0.001, ui.scale)
+    ui.on_wheel(Event(), -1)
+    ui.on_wheel(Event(), -1)
+    check("the wheel steps the size down", abs(ui.scale - 1.4) < 0.001, ui.scale)
+    ui.set_scale(bar.MAX_SCALE)
+    ui.root.update()
+    max_text_items = [item for item in ui.canvas.find_all() if ui.canvas.type(item) == "text"]
+    max_right = max(ui.canvas.bbox(item)[2] for item in max_text_items)
+    check("the content fits at the largest size too", max_right <= ui.width - ui.px(15) - ui.px(8), (max_right, ui.width))
+    ui.set_scale(bar.MAX_SCALE + 10)
+    check("dragging past the limit does not run away", ui.scale == bar.MAX_SCALE, ui.scale)
+    ui.on_press(Event(x=ui.width - 3, y=ui.height - 3, x_root=1000, y_root=800))
+    check("the corner starts a resize", ui.resize_active is True, (ui.width, ui.height))
+    ui.on_motion(Event(x=0, y=0, x_root=1000 - 80, y_root=800 - 30))
+    ui.on_release(Event(x=0, y=0, x_root=1000 - 80, y_root=800 - 30))
+    ui.root.update()
+    check("dragging the corner resizes the bar", ui.scale < bar.MAX_SCALE and bar.load_saved_scale(scale_file) == ui.scale, (ui.scale, bar.load_saved_scale(scale_file)))
+    check("the drag did not move the window instead", ui.drag_moved is False, ui.drag_moved)
+    ui.on_right_press(Event())
+    ui.root.update()
+    check("a right click resets the size", ui.scale == 1.0 and bar.load_saved_scale(scale_file) == 1.0, ui.scale)
+    collapsed_scale = 1.2
+    ui.set_scale(collapsed_scale)
+    ui.set_collapsed(True)
+    ui.root.update()
+    check("the mini bar scales too", (ui.width, ui.height) == (round(bar.MINI_WIDTH * collapsed_scale), round(bar.MINI_HEIGHT * collapsed_scale)), (ui.width, ui.height))
+    ui.set_collapsed(False)
+    ui.set_scale(1.0)
+    ui.root.update()
 
     # Without a current session the last completed session's totals remain visible.
     current_file.write_text(json.dumps({"available": False}), encoding="utf-8")

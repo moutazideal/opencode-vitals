@@ -4,6 +4,142 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-09-26
+
+Honest numbers, a second reading, and a bar you can size.
+
+### Added
+
+- **The average of the last ten responses, next to the session average.**
+  `· N last10` is the mean of the rates of the last ten completed responses for
+  the session on screen. The session average is the whole session divided as one
+  sum and barely moves once a session is long; the last-ten reading reacts to the
+  reply you just watched. The per-response rates are kept in the session totals
+  (`recentRates`), so they survive a plugin reload and travel with the totals
+  snapshot the bar already reads. A response with no honest rate is skipped
+  rather than counted as zero.
+- **The bar is yours to size.** Drag the bottom-right grip, or hold Ctrl and use
+  the wheel; everything scales together and the size is remembered in
+  `popup-scale.json`. Right-click resets it to 100%, `OPENCODE_LATENCY_SCALE`
+  pins it from the environment, and the range is 0.6×–2.5×. The collapsed bar
+  scales with the same number.
+- **The bar steps aside when your attention moves.** On Linux/X11 the window is
+  followed three ways now: minimized (`_NET_WM_STATE`), another program focused
+  (`_NET_ACTIVE_WINDOW`), or another window covering OpenCode
+  (`_NET_CLIENT_LIST_STACKING` plus real window geometry, 60% coverage). Everything
+  is fail-open — when a question cannot be answered the bar stays visible — and
+  each part can be switched off with `OPENCODE_LATENCY_HIDE_UNFOCUSED=0` or
+  `OPENCODE_LATENCY_HIDE_OCCLUDED=0`.
+- The selftest reports whether `xprop` and `xwininfo` are present, as notes.
+- New screenshots: the bar and the collapsed bar captured at 2× from the running
+  program with the last-ten reading on screen, and a real desktop capture sent in
+  by the project's author, whose bar is reading `7 turns · 66 steps · 243 tok/s ·
+  311 last10`. Every caption in the README shows the numbers its picture shows.
+
+### Fixed
+
+- **Clicking the bar made it flicker.** Tk's `winfo_id()` names the child window
+  it draws in, while the window manager tracks its parent — and the parent is
+  what `_NET_ACTIVE_WINDOW` reports the moment the bar is clicked. The bar only
+  knew the child id, so its own window looked like another application: click,
+  hide, focus back to OpenCode, show, click again. The window manager's window is
+  now matched once by title (`_NET_WM_NAME`), and a click on the bar counts as
+  being in the app.
+- **A restart could freeze a session's totals, last-ten list included.** History
+  keeps twenty records across every session, so a plugin that rebuilt its view
+  from history alone came back *behind* the totals it had already published; the
+  whole-snapshot rule then correctly kept the newer on-disk entry, and the
+  rebuilt count had to catch up before anything moved again. The totals file is
+  now part of the seed — history first, then the file, newest snapshot per
+  session — and the merged view is published at startup instead of waiting for
+  the next response.
+- **The last-ten list is not seeded from rates measured the old way.** A rate
+  from before the tool-call fix is a different quantity (that is where the
+  4686 tok/s came from), so mixing it into an average would put a number nobody
+  can defend in front of the user. The list starts with the first response
+  measured the current way, and a totals snapshot that already carries one keeps
+  it.
+- **The bar's second reading was the wrong reading.** A rolling window of the
+  last chunks was briefly tried and removed: what the number is for is the
+  average speed of the last ten responses, and a per-chunk reading answered a
+  question nobody asked — while a session average already answers the long view.
+- **A four digit rate pushed the second reading off the card.** Rates of 1000 and
+  above are printed short (`4.7k`), so one line always fits, and the card is 390
+  pixels wide instead of 360.
+- **Model speed was overstated, sometimes wildly.** A step's token count includes
+  the tokens spent writing its tool call, and those arguments stream as
+  `session.tool.input.*` rather than text — they were counted in the numerator
+  with no time in the denominator. On this machine that printed `4686 tok/s` for
+  a turn whose visible output was 80 characters. The tool-call arguments are now
+  measured as model time, and the record carries `toolArgCharacters` and
+  `toolArgDeltaCount` so the arithmetic can be checked.
+- **The one-message wall-clock fallback no longer fires on a tool-using turn.**
+  It is only used when the turn really was a single message and a single step;
+  otherwise the record reports `unavailable` instead of a flattering number.
+- **Session totals could describe a state the session never had.** The plugin
+  and the bar each took the maximum of every field separately when merging
+  totals, so a record could hold one turn's token count next to another turn's
+  stream time — and every reader divides one by the other. Totals are ranked and
+  replaced as a whole snapshot now (`turns` first, timestamp as the tie-break),
+  in `mergeSeededTotals`, `updateSessionTotals`, `publishSessionTotals` and the
+  bar's `merge_totals`, with `snapshotRank` and `newerSnapshot` on the plugin
+  side and `snapshot_rank` in the bar. An older snapshot can no longer walk the
+  numbers backwards.
+- **Publishing totals erased the other projects' sessions.** Several instances
+  of this plugin share one totals file, one per project directory, and each wrote
+  only what it knew. The on-disk sessions are merged in before writing now.
+- **A reconnect inflated the denominator.** A stream that stops for longer than
+  30 seconds and continues under the same message id was interrupted, not slow;
+  the span restarts there instead of counting the silence (`STREAM_GAP_LIMIT_MS`).
+- **A reply that arrived in one piece showed no rate at all.** When there is no
+  measurable stream span and the response is a single message, the rate falls
+  back to first-to-last and then to that message's own wall time. A multi-message
+  response still refuses a rate, because there the wall time is mostly tool time.
+  The record now carries `rateSource` so the fallback is visible.
+- **Two executions running at once were reported as one turn.** A second
+  `session.execution.started` with evidence closes the open turn first, so
+  parallel work and subagents no longer merge into a single inflated turn. Step
+  tokens are kept per agent on the record (`agents`).
+- **Unknown event types were dropped in silence.** Anything outside
+  `HANDLED_TYPES`/`IGNORED_TYPES` is counted, reported on the record as
+  `unknownEventTypes` and logged at most once every few minutes. A renamed or
+  removed event used to delete measurements with no error anywhere.
+- **The bar was polling far harder than it needed to.** Records are read through
+  a stat-based cache (`RecordCache`), the poll beat went from 200ms to 500ms,
+  the search for the OpenCode window runs on its own slower beat with rejected
+  window ids remembered, and the announcement write moved out of the render path
+  (`announce_pending_update`).
+- **A bar that correctly stood down was counted as a crash.** The bar now exits
+  with code 6 when another instance owns the lock, and the plugin treats that as
+  the wanted state: the failure count resets and the next look is 30 seconds
+  later, instead of an escalating backoff and a failure line in the log.
+- **The `/proc` walk no longer blocks the event loop**, and a desktop-process
+  scan is cached while it resolves, so `desktopAppAlive()` answers immediately
+  instead of holding up every other event.
+- The status directory is created `0700`; the lock deadline is 2 seconds past
+  the TTL so a waiter and its holder cannot expire together; the plugin no longer
+  resurrects a version notice the bar has already shown; `install.mjs` documents
+  `npx opencode-vitals install` rather than the name npm answers with 404.
+
+### Changed
+
+- `log` defaults to **`false`**: one line per completed turn in somebody else's
+  log file is noise, and the numbers are on the bar. Errors and version changes
+  go through a new `warn()` path that prints whatever the option says.
+- `PLUGIN_ID` is `opencode-vitals` in log lines. The status directory and the
+  `OPENCODE_LATENCY_*` variables keep their older names on purpose: the bar, the
+  selftest and every installed copy already agree on those strings.
+- The bar's collapsed state is `set_collapsed`/`collapsed` rather than reusing
+  `set_minimized`, which is a different thing (the window manager's).
+- Tool execution events (`session.tool.*` apart from `session.tool.input.*`),
+  `session.step.streamed` and the interface families are listed as known and
+  deliberately unmeasured, so a normal session no longer reports them as unknown
+  events. A renamed measurement event still shows up as unknown.
+
+### Measured
+
+- 223 plugin checks and 135 bar checks, up from 166 and 66.
+
 ## [0.1.4] - 2026-09-26
 
 ### Added
@@ -178,6 +314,7 @@ The first public release.
   logic is covered by tests driven by a fake process list, but no macOS or
   Windows machine has run it yet.
 
+[0.1.5]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.5
 [0.1.4]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.4
 [0.1.3]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.3
 [0.1.2]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.2

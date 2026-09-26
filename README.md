@@ -10,6 +10,11 @@
     <img alt="network calls: none" src="https://img.shields.io/badge/network%20calls-none-2ea44f">
     <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-8b5cf6">
   </p>
+  <p>
+    <a href="CHANGELOG.md">Changelog</a> ·
+    <a href="https://github.com/moutazideal/opencode-vitals/releases">Releases</a> ·
+    <a href="https://github.com/moutazideal/opencode-vitals/issues">Issues</a>
+  </p>
 </div>
 
 ---

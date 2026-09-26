@@ -1,0 +1,31 @@
+name: Bug report
+about: Something behaves differently from what the README says
+title: "[bug] "
+labels: ""
+body: |
+  ## What happened
+
+  ## What I expected instead
+
+  ## Your machine
+
+  - operating system and version:
+  - OpenCode version:
+  - Python version (`python3 --version`):
+
+  ## Selftest output
+
+  This is the fastest way to see why. Please paste the whole thing.
+
+  ```bash
+  npx opencode-vitals-selftest
+  ```
+
+  ```
+  (paste here)
+  ```
+
+  ## Please do not paste conversation text
+
+  This plugin never stores prompts or responses, and a report should not
+  either. Timings, counts and identifiers are enough to find the problem.

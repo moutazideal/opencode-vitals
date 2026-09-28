@@ -75,6 +75,18 @@ const PLUGIN_VERSION_FILE = join(STATUS_DIR, "plugin-version.json")
 // just watched fast", which is the question a long session's average stops
 // being able to answer.
 const RECENT_RATE_COUNT = 10
+// Mirrors SUBAGENT_FIELDS in bar.py: the delegated-work counters travel with the
+// snapshot, so a bar from another version still keeps them.
+const SUBAGENT_FIELDS = ["subagentTurns", "subagentSteps"]
+// A slow or absent session API must not hold a finished measurement open: the
+// turn is already complete and its numbers are already known.
+const SESSION_LOOKUP_TIMEOUT_MS = 2000
+// How often the plugin reconsiders whether a bar belongs on the screen, and how
+// long a measured session may go without producing a record before the bar
+// stands down. OpenCode keeps running with no session open, and a measurement
+// bar outliving every session it was measuring is the bug this pair removes.
+const COMPANION_TICK_MS = 5000
+const IDLE_HIDE_MS = 15 * 60 * 1000
 // The OpenCode service is supervised by systemd and outlives the Desktop app, so
 // the bar cannot be tied to the plugin process alone. No server event reports a
 // client disconnect, so the app process itself is the signal.
@@ -82,14 +94,25 @@ const DESKTOP_PROCESS_NAMES = ["ai.opencode.desktop", "opencode-desktop", "OpenC
 const DESKTOP_MISSING_GRACE_MS = 10 * 60 * 1000
 const DESKTOP_CHECK_TTL_MS = 4000
 
-function runtimeFor(location) {
+// Every OpenCode instance on the machine shares one status directory, so a
+// session number is only meaningful next to the project it belongs to. The
+// canonical project root is preferred over this instance's own directory, so a
+// worktree or a nested package files under the project it belongs to.
+function projectKeyFor(location) {
+  const canonical = location?.project?.canonical
+  const directory = typeof canonical === "string" && canonical ? canonical : location?.directory
+  return typeof directory === "string" && directory ? directory : null
+}
+
+function runtimeFor(location, project = null) {
   const root = globalThis[RUNTIME_KEY] ?? (globalThis[RUNTIME_KEY] = new Map())
   const key = location || "__global__"
   let runtime = root.get(key)
   if (!runtime) {
-    runtime = { controller: null, companionTimer: null, markerTimer: null }
+    runtime = { controller: null, companionTimer: null, markerTimer: null, project: null }
     root.set(key, runtime)
   }
+  if (project) runtime.project = project
   return runtime
 }
 
@@ -282,7 +305,13 @@ function desktopAppAlive() {
   return true
 }
 
-function barExpectedFrom({ desktopEnv, desktopAlive, lastDesktopSeenAt, now }) {
+// Whether the bar belongs on the screen. "OpenCode is installed" is not the
+// question: the process outlives the sessions that use it, so a bar keyed to
+// process existence stays up for a program nobody is looking at any more.
+function barExpectedFrom({ desktopEnv, desktopAlive, lastDesktopSeenAt, now, openSessionAt }) {
+  // Someone has to have measured something. Before the first turn there is
+  // nothing to show, and a bar with nothing on it is just an overlay.
+  if (openSessionAt !== undefined && now - openSessionAt > IDLE_HIDE_MS) return false
   if (desktopEnv !== "desktop") return true
   if (desktopAlive) return true
   if (lastDesktopSeenAt === undefined) return true
@@ -296,6 +325,7 @@ function barExpected(runtime) {
     desktopEnv: process.env.OPENCODE_CLIENT,
     desktopAlive: alive,
     lastDesktopSeenAt: runtime.lastDesktopSeenAt,
+    openSessionAt: runtime.openSessionAt,
     now: Date.now(),
   })
 }
@@ -349,6 +379,10 @@ function spawnBarProcess(runtime, build) {
       OPENCODE_LATENCY_CURRENT_FILE: CURRENT_SESSION_FILE,
       OPENCODE_LATENCY_TOTALS_FILE: SESSION_TOTALS_FILE,
       OPENCODE_LATENCY_PARENT_PID: String(process.pid),
+      // The bar is one window for one screen, and every project on the machine
+      // shares the files it reads. It is told which project spawned it so it
+      // never answers with another project's numbers.
+      ...(runtime.project ? { OPENCODE_LATENCY_PROJECT: runtime.project } : {}),
     },
   })
   companions.popup = child
@@ -773,8 +807,9 @@ function formatMs(value) {
   return value === null || value === undefined ? "unavailable" : `${value.toFixed(2)} ms`
 }
 
-function createState(rawOptions) {
+function createState(rawOptions, context = {}) {
   const options = normalizeOptions(rawOptions)
+  const project = typeof context.project === "string" && context.project ? context.project : null
   const active = new Map()
   const finishing = new Set()
   const finishQueues = new Map()
@@ -793,9 +828,15 @@ function createState(rawOptions) {
   const completedResponseKeys = new Set()
   const closedTurns = new Map()
   const sessionTotals = new Map()
+  // sessionID -> the session that delegated to it, or null when it is a root
+  // session. A subagent runs as a child session, so its work is invisible to the
+  // session that asked for it unless the link is followed.
+  const sessionParents = new Map()
+  const parentLookups = new Map()
   let storage
   let persistChain = Promise.resolve()
   let currentSession = { known: false, id: null }
+  let lastMeasuredAt = null
 
   function writeLine(ctx, line, level) {
     // One sink, not two: OpenCode's own logger when the host offers it, the
@@ -855,12 +896,29 @@ function createState(rawOptions) {
       .join(", ")
   }
 
+  // One entry per project. This file used to hold a single session, so the last
+  // OpenCode instance on the machine to publish won it, and its numbers were
+  // shown under whichever project the bar belonged to. Each instance now writes
+  // only its own key and merges the rest, so a bar can ask for its project.
   function publishCurrentSession() {
     if (!options.popup) return
-    const payload = currentSession.known && currentSession.id
+    const entry = currentSession.known && currentSession.id
       ? { available: true, sessionID: currentSession.id, source: "events", observedAt: now() }
       : { available: false, source: "events", observedAt: now() }
-    void writeJsonAtomic(CURRENT_SESSION_FILE, payload).catch(() => {})
+    // The read and the write are one locked step: a second instance publishing
+    // between them would otherwise be lost, which is the bug this shape exists
+    // to remove.
+    void withStorageLock(async () => {
+      const projects = {}
+      try {
+        const raw = JSON.parse(await readFile(CURRENT_SESSION_FILE, "utf8"))
+        if (isRecord(raw?.projects)) Object.assign(projects, raw.projects)
+      } catch {
+        // No file yet, or a v1 file holding a single slot.
+      }
+      if (project) projects[project] = entry
+      await writeJsonAtomic(CURRENT_SESSION_FILE, { version: 2, observedAt: now(), projects })
+    }).catch(() => {})
   }
 
   function setCurrentSessionId(sessionID) {
@@ -871,6 +929,14 @@ function createState(rawOptions) {
     }
     currentSession = { known: true, id: sessionID }
     publishCurrentSession()
+  }
+
+  // The companion tick asks whether a bar still belongs on the screen, and the
+  // answer depends on when a record was last produced. Publishing one is the
+  // proof that a session is live, so this is set where a record is written
+  // rather than on a timer of its own.
+  function noteMeasuredFor(runtime) {
+    if (lastMeasuredAt !== null) runtime.openSessionAt = lastMeasuredAt
   }
 
   function refreshCurrentSession() {
@@ -919,6 +985,13 @@ function createState(rawOptions) {
       reasoningTokens: 0,
       generatedTokens: 0,
       activeStreamMs: 0,
+      // Work this session delegated to subagents. A subagent runs as a child
+      // session with its own stream time, so its tokens are counted here but
+      // its time is not: adding them to the parent's rate would print a speed
+      // the session never produced.
+      subagentTurns: 0,
+      subagentSteps: 0,
+      project,
       tokensPerSecond: null,
       // The rates of the most recent responses, oldest first, so the bar can
       // average the last ten instead of the whole session. A response without a
@@ -959,6 +1032,10 @@ function createState(rawOptions) {
         for (const field of ["turns", "steps", "outputTokens", "reasoningTokens", "generatedTokens", "activeStreamMs"]) {
           totals[field] = numberOrNull(snapshot[field]) ?? 0
         }
+        for (const field of SUBAGENT_FIELDS) {
+          totals[field] = numberOrNull(snapshot[field]) ?? 0
+        }
+        if (typeof snapshot.project === "string" && snapshot.project) totals.project = snapshot.project
         totals.tokensPerSecond = numberOrNull(snapshot.tokensPerSecond) ?? null
         const recent = readRecentRates(snapshot.recentRates)
         if (recent.length > 0) totals.recentRates = recent
@@ -1307,6 +1384,37 @@ function createState(rawOptions) {
     return { output: null, reasoning: null, source: "unavailable" }
   }
 
+  // A subagent's events carry the child's session id, so the parent's totals
+  // never saw the work it delegated. The link is asked of the server once per
+  // session and remembered; a failure resolves to null, which leaves the child
+  // counted on its own rather than guessing at a parent.
+  async function resolveParent(ctx, sessionID) {
+    // Every project spawns sessions of its own, and only a session that has
+    // already been measured needs its parent asked for.
+    if (sessionParents.has(sessionID)) return sessionParents.get(sessionID)
+    if (typeof ctx?.session?.get !== "function") {
+      sessionParents.set(sessionID, null)
+      return null
+    }
+    const pending = parentLookups.get(sessionID)
+    if (pending) return pending
+    const lookup = (async () => {
+      let parent = null
+      try {
+        const info = await withTimeout(Promise.resolve(ctx.session.get({ sessionID })), SESSION_LOOKUP_TIMEOUT_MS)
+        const candidate = isRecord(info) ? info.parentID ?? info.parentId : null
+        if (typeof candidate === "string" && candidate && candidate !== sessionID) parent = candidate
+      } catch {
+        // No session API, or it did not answer: the child keeps its own totals.
+      }
+      sessionParents.set(sessionID, parent)
+      parentLookups.delete(sessionID)
+      return parent
+    })()
+    parentLookups.set(sessionID, lookup)
+    return lookup
+  }
+
   function updateSessionTotals(sessionID, record) {
     let totals = sessionTotals.get(sessionID)
     if (!totals) {
@@ -1332,6 +1440,32 @@ function createState(rawOptions) {
     sessionTotals.set(sessionID, totals)
     while (sessionTotals.size > 50) sessionTotals.delete(sessionTotals.values().next().value)
     return { ...totals, recentRates: [...totals.recentRates] }
+  }
+
+  // Credit a parent session with work it delegated. A subagent runs as a child
+  // session and streams at its own speed, so its steps and tokens are added to
+  // the parent while its stream time is not: the parent's rate is
+  // generatedTokens over activeStreamMs, and a subagent's tokens without its
+  // seconds would print a speed the parent never ran at. The subagent's own rate
+  // stays on its own session, where its own time is known. Delegated work is
+  // counted in the parent's steps so "steps" means the work the session caused.
+  function creditParentWithSubagent(parentID, record) {
+    if (!parentID || parentID === record.sessionID) return
+    let parent = sessionTotals.get(parentID)
+    if (!parent) {
+      parent = emptyTotals()
+      sessionTotals.set(parentID, parent)
+    }
+    parent.steps += Number.isFinite(record.stepCount) ? record.stepCount : 0
+    for (const field of ["outputTokens", "reasoningTokens", "generatedTokens"]) {
+      if (Number.isFinite(record[field]) && record[field] > 0) parent[field] += record[field]
+    }
+    parent.subagentTurns += 1
+    parent.subagentSteps += Number.isFinite(record.stepCount) ? record.stepCount : 0
+    // activeStreamMs, tokensPerSecond and recentRates are deliberately untouched.
+    sessionTotals.delete(parentID)
+    sessionTotals.set(parentID, parent)
+    while (sessionTotals.size > 50) sessionTotals.delete(sessionTotals.values().next().value)
   }
 
   // OpenCode runs setup once per project directory, so several instances of this
@@ -1503,8 +1637,20 @@ function createState(rawOptions) {
         : generatedTokens / totalSeconds,
       completedAt: new Date(completedAt).toISOString(),
     }
+    lastMeasuredAt = completedAt
     record.sessionTotals = updateSessionTotals(sessionID, record)
+    // Work this session delegated is credited to whoever asked for it, so a
+    // parent session's steps are the work it caused and not only the replies it
+    // typed. Skipped when the session is a root one.
+    const parentID = await resolveParent(ctx, sessionID)
+    if (parentID) {
+      record.parentSessionID = parentID
+      creditParentWithSubagent(parentID, record)
+    }
     await persist(record)
+    // Written after the credit above, so the parent this record delegated to is
+    // in the file the bar reads and not only in memory until the next turn.
+    if (options.popup) void publishSessionTotals().catch(() => {})
     log(
       ctx,
       `session=${record.sessionID} start=${record.startSource} first_token=${formatMs(record.firstTokenMs)} ` +
@@ -1742,6 +1888,14 @@ export const vitalsInternals = {
   IGNORED_PREFIXES,
   isIgnoredEventType,
   RECENT_RATE_COUNT,
+  SUBAGENT_FIELDS,
+  SESSION_LOOKUP_TIMEOUT_MS,
+  IDLE_HIDE_MS,
+  COMPANION_TICK_MS,
+  SESSION_TOTALS_FILE,
+  CURRENT_SESSION_FILE,
+  projectKeyFor,
+  barExpectedFrom,
   scanDesktopProcess,
   processListDecision,
   barExpectedFrom,
@@ -1762,12 +1916,13 @@ export const vitalsInternals = {
 export default {
   id: PLUGIN_ID,
   async setup(ctx) {
-    const runtime = runtimeFor(ctx.location?.directory)
+    const project = projectKeyFor(ctx.location)
+    const runtime = runtimeFor(ctx.location?.directory, project)
     runtime.controller?.abort()
     if (runtime.companionTimer) clearInterval(runtime.companionTimer)
     const controller = new AbortController()
     runtime.controller = controller
-    const state = createState(ctx.options)
+    const state = createState(ctx.options, { project })
     let companionTimer = null
     let markerTimer = null
     const cleanup = () => {
@@ -1786,10 +1941,11 @@ export default {
     // the bar itself leaves when the OpenCode app is closed.
     if (state.options.popup) {
       companionTimer = setInterval(() => {
+        state.noteMeasuredFor(runtime)
         if (barExpected(runtime)) startPopup(runtime)
         else void stopPopup()
         state.refreshCurrentSession()
-      }, 5000)
+      }, COMPANION_TICK_MS)
       companionTimer.unref?.()
       runtime.companionTimer = companionTimer
     }

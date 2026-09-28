@@ -78,7 +78,7 @@ async function run(events, options = {}) {
   const storage = makeStorage(options.initialStorage)
   const context = {
     options: { popup: false, log: false, ...options.pluginOptions },
-    location: { directory: `/tmp/opencode/latency-audit-${Math.random()}` },
+    location: { directory: `/tmp/opencode/latency-audit-${Math.random()}`, ...(options.location ?? {}) },
     storage,
     ...(options.app ? { app: options.app } : {}),
     event: {
@@ -97,6 +97,9 @@ async function run(events, options = {}) {
       async context() {
         return []
       },
+      // Absent unless a case needs it: a plugin with no session API must still
+      // measure, it just cannot tell a subagent from a root session.
+      ...(options.sessions ? { async get({ sessionID }) { return options.sessions[sessionID] ?? null } } : {}),
       synthetic() {
         throw new Error("synthetic must not be called")
       },
@@ -539,6 +542,16 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("first sighting keeps bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: undefined, now }) === true)
   check("closed app hides bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: now - 60_000, now }) === false)
   check("long absence restores bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: now - grace - 1, now }) === true)
+
+  // A measurement bar must not outlive every session it was measuring. OpenCode
+  // keeps running with nothing open, and process existence is not usage.
+  const idle = vitalsInternals.IDLE_HIDE_MS
+  check("a session measured just now keeps the bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - 60_000, now }) === true)
+  check("an idle install stands the bar down", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - idle - 1, now }) === false)
+  check("idle stands the bar down on the desktop too", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: true, openSessionAt: now - idle - 1, now }) === false)
+  check("a session never measured keeps the bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: undefined, now }) === true)
+  check("the companion tick is frequent enough to notice", vitalsInternals.COMPANION_TICK_MS <= 10_000, vitalsInternals.COMPANION_TICK_MS)
+  check("the idle window is long enough to work in", vitalsInternals.IDLE_HIDE_MS >= 10 * 60 * 1000, vitalsInternals.IDLE_HIDE_MS)
 }
 
 // 18. Closing the app stops the running bar, proven in an isolated status dir.
@@ -1346,6 +1359,122 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   cleanup()
   if (previousTotals !== null) writeFileSync(totalsPath, previousTotals)
   else rmSync(totalsPath, { force: true })
+}
+
+// A subagent runs as a child session, so its events carry the child's id and the
+// session that asked for it never saw the work. The link is real and it is in
+// the session record; these cases pin that following it counts the work in the
+// parent, and that the parent's rate does not claim a speed it never ran at.
+{
+  const parent = `ses_parent${unique.slice(0, 14)}`
+  const child = `ses_child${unique.slice(0, 14)}`
+  const childEvents = [
+    envelope("session.execution.started", { sessionID: child }, base + 10),
+    envelope("session.step.started", { sessionID: child, assistantMessageID: "msg_c1", agent: "general" }, base + 20),
+    envelope("session.text.delta", { sessionID: child, assistantMessageID: "msg_c1", delta: "working" }, base + 100),
+    envelope("session.step.ended", { sessionID: child, assistantMessageID: "msg_c1", tokens: { output: 500 } }, base + 300),
+    envelope("session.step.started", { sessionID: child, assistantMessageID: "msg_c2", agent: "general" }, base + 320),
+    envelope("session.text.delta", { sessionID: child, assistantMessageID: "msg_c2", delta: "more" }, base + 420),
+    envelope("session.step.ended", { sessionID: child, assistantMessageID: "msg_c2", tokens: { output: 700 } }, base + 600),
+    envelope("session.execution.succeeded", { sessionID: child }, base + 700),
+  ]
+  // popup on, because the credit is published in the totals file the bar reads.
+  const { storage, cleanup } = await run(childEvents, {
+    sessions: { [child]: { id: child, parentID: parent } },
+    pluginOptions: { popup: true },
+  })
+  const record = await waitForRecord(storage, (item) => item.sessionID === child)
+  await wait(300)
+  check("the subagent record names its parent", record.parentSessionID === parent, JSON.stringify(record.parentSessionID))
+  check("the subagent still counts on its own session", record.sessionTotals?.turns === 1 && record.sessionTotals?.steps === 2, JSON.stringify(record.sessionTotals))
+  check("the subagent has no delegated counters", record.sessionTotals?.subagentTurns === 0, JSON.stringify(record.sessionTotals?.subagentTurns))
+  const totalsPath = vitalsInternals.SESSION_TOTALS_FILE
+  const previous = existsSync(totalsPath) ? readFileSync(totalsPath, "utf8") : null
+  const onDisk = JSON.parse(readFileSync(totalsPath, "utf8"))
+  const parentTotals = onDisk.sessions?.[parent]
+  check("the parent is credited with the delegated steps", parentTotals?.steps === 2, JSON.stringify(parentTotals))
+  check("the parent is credited with the delegated tokens", parentTotals?.outputTokens === 1200, JSON.stringify(parentTotals?.outputTokens))
+  check("the delegated work is counted apart", parentTotals?.subagentTurns === 1 && parentTotals?.subagentSteps === 2, JSON.stringify(parentTotals))
+  check("the parent took no turns of its own", parentTotals?.turns === 0, JSON.stringify(parentTotals?.turns))
+  // The trap this shape exists to avoid: 1200 tokens with none of the subagent's
+  // stream time would print a speed the parent never produced.
+  check("the parent's rate does not claim the subagent's speed", parentTotals?.tokensPerSecond === null, JSON.stringify(parentTotals?.tokensPerSecond))
+  check("the parent's stream time is untouched", parentTotals?.activeStreamMs === 0, JSON.stringify(parentTotals?.activeStreamMs))
+  check("the parent's last-ten list is untouched", (parentTotals?.recentRates ?? []).length === 0, JSON.stringify(parentTotals?.recentRates))
+  cleanup()
+  if (previous !== null) writeFileSync(totalsPath, previous)
+  else rmSync(totalsPath, { force: true })
+}
+
+// A root session has no parent, and a session API that cannot answer must not
+// invent one: the work stays on the session that did it.
+{
+  const root = `ses_root${unique.slice(0, 15)}`
+  const events = [
+    envelope("session.execution.started", { sessionID: root }, base + 10),
+    envelope("session.step.started", { sessionID: root, assistantMessageID: "msg_r1" }, base + 20),
+    envelope("session.text.delta", { sessionID: root, assistantMessageID: "msg_r1", delta: "hi" }, base + 100),
+    envelope("session.step.ended", { sessionID: root, assistantMessageID: "msg_r1", tokens: { output: 40 } }, base + 200),
+    envelope("session.execution.succeeded", { sessionID: root }, base + 300),
+  ]
+  const { storage, cleanup } = await run(events, { sessions: { [root]: { id: root, parentID: null } } })
+  const record = await waitForRecord(storage, (item) => item.sessionID === root)
+  check("a root session has no parent recorded", record.parentSessionID === undefined, JSON.stringify(record.parentSessionID))
+  cleanup()
+
+  // No session API at all: the measurement still completes, undelegated.
+  const orphan = `ses_orph${unique.slice(0, 15)}`
+  const orphanEvents = events.map((event) => ({ ...event, data: { ...event.data, sessionID: orphan } }))
+  const second = await run(orphanEvents)
+  const orphanRecord = await waitForRecord(second.storage, (item) => item.sessionID === orphan)
+  check("a missing session API does not stop the measurement", orphanRecord.sessionTotals?.turns === 1, JSON.stringify(orphanRecord.sessionTotals))
+  check("without a session API the work stays on its own session", orphanRecord.sessionTotals?.subagentTurns === 0, JSON.stringify(orphanRecord.sessionTotals?.subagentTurns))
+  second.cleanup()
+}
+
+// Every session number is filed under the project it belongs to, because every
+// OpenCode instance on the machine shares one status directory.
+{
+  const alpha = `ses_alpha${unique.slice(0, 13)}`
+  const events = [
+    envelope("session.execution.started", { sessionID: alpha }, base + 10),
+    envelope("session.step.started", { sessionID: alpha, assistantMessageID: "msg_p" }, base + 20),
+    envelope("session.text.delta", { sessionID: alpha, assistantMessageID: "msg_p", delta: "x" }, base + 100),
+    envelope("session.step.ended", { sessionID: alpha, assistantMessageID: "msg_p", tokens: { output: 25 } }, base + 200),
+    envelope("session.execution.succeeded", { sessionID: alpha }, base + 300),
+  ]
+  const { storage, cleanup } = await run(events, {
+    location: { directory: "/home/someone/code/alpha", project: { id: "p_alpha", directory: "/home/someone/code/alpha", canonical: "/home/someone/code/alpha" } },
+  })
+  const record = await waitForRecord(storage, (item) => item.sessionID === alpha)
+  check("the record carries its project", record.sessionTotals?.project === "/home/someone/code/alpha", JSON.stringify(record.sessionTotals?.project))
+  cleanup()
+}
+
+// The current-session file is a map keyed by project now, so two instances stop
+// overwriting each other's session.
+{
+  const first = `ses_first${unique.slice(0, 14)}`
+  const second = `ses_second${unique.slice(0, 13)}`
+  const build = (sessionID) => [
+    envelope("session.viewed", { sessionID }, base + 10),
+  ]
+  const a = await run(build(first), {
+    pluginOptions: { popup: true },
+    location: { directory: "/home/someone/code/alpha", project: { id: "p", directory: "/home/someone/code/alpha", canonical: "/home/someone/code/alpha" } },
+  })
+  const b = await run(build(second), {
+    pluginOptions: { popup: true },
+    location: { directory: "/home/someone/code/beta", project: { id: "q", directory: "/home/someone/code/beta", canonical: "/home/someone/code/beta" } },
+  })
+  await wait(300)
+  const currentPath = vitalsInternals.CURRENT_SESSION_FILE
+  const current = JSON.parse(readFileSync(currentPath, "utf8"))
+  check("the current-session file is a per-project map", current.version === 2 && typeof current.projects === "object", JSON.stringify(current).slice(0, 160))
+  check("the first project kept its entry", current.projects?.["/home/someone/code/alpha"]?.sessionID === first, JSON.stringify(current.projects))
+  check("the second project kept its own entry", current.projects?.["/home/someone/code/beta"]?.sessionID === second, JSON.stringify(current.projects))
+  a.cleanup()
+  b.cleanup()
 }
 
 for (const result of results) {

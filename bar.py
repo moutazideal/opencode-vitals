@@ -39,7 +39,7 @@ DEFAULT_LOCK_FILE = Path(tempfile.gettempdir()) / "opencode-latency-monitor" / "
 DEFAULT_VERSION_FILE = Path(tempfile.gettempdir()) / "opencode-latency-monitor" / "plugin-version.json"
 STATUS_DIR_MODE = 0o700
 UPDATE_BADGE_MS = 8000
-NORMAL_WIDTH = 390
+NORMAL_WIDTH = 450
 NORMAL_HEIGHT = 54
 MINI_WIDTH = 62
 MINI_HEIGHT = 62
@@ -68,6 +68,11 @@ LOCK_DELAY_SECONDS = 0.2
 LOCK_HELD_EXIT_CODE = 6
 DRAG_THRESHOLD = 3
 TOTAL_FIELDS = ("turns", "steps", "outputTokens", "reasoningTokens", "generatedTokens", "activeStreamMs")
+# Work a session delegated to subagents. Counted apart from the session's own,
+# because a subagent runs in a child session with its own stream time: adding
+# its tokens to the parent's numerator without that time is how a rate becomes a
+# flattering number.
+SUBAGENT_FIELDS = ("subagentTurns", "subagentSteps")
 WINDOW_BG = "#0b0e15"
 CARD_BG = "#161b28"
 CARD_BORDER = "#28324a"
@@ -258,9 +263,31 @@ class RecordCache:
         self.entries.pop(path, None)
 
 
-def load_current_session(path: Path, cache: "RecordCache | None" = None) -> dict[str, Any] | None:
+def load_current_session(
+    path: Path,
+    cache: "RecordCache | None" = None,
+    project: str | None = None,
+) -> dict[str, Any] | None:
     record = cache.read(path) if cache is not None else load_record(path)
-    if record is None or record.get("available") is not True:
+    if not isinstance(record, dict):
+        return None
+    # v2 keeps one entry per project. v1 had a single slot, so every OpenCode
+    # instance on the machine overwrote the others' current session and the bar
+    # showed whichever project wrote last. Read v1 too, so a bar and a plugin
+    # from different versions can overlap during an update.
+    if record.get("version") == 2:
+        projects = record.get("projects")
+        if not isinstance(projects, dict):
+            return None
+        if project is None:
+            # No project to match and several to choose from: picking one would
+            # be a guess, and a guess here is the bug this file shape fixes.
+            return None
+        entry = projects.get(project)
+        if not isinstance(entry, dict):
+            return None
+        record = entry
+    if record.get("available") is not True:
         return None
     observed_at = record.get("observedAt")
     if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool):
@@ -400,6 +427,20 @@ def merge_totals(target: dict[str, dict[str, float]], sessions: Any) -> bool:
             merged["recentRates"] = current["recentRates"]
         if "updatedAt" in values:
             merged["updatedAt"] = values["updatedAt"]
+        # Which project owns the session. Two OpenCode instances on one machine
+        # share this file, so the bar needs to tell "no measurements yet" from
+        # "these are another project's measurements".
+        project = values.get("project")
+        if isinstance(project, str) and project:
+            merged["project"] = project
+        elif isinstance(current.get("project"), str):
+            merged["project"] = current["project"]
+        for field in SUBAGENT_FIELDS:
+            number = values.get(field)
+            if isinstance(number, (int, float)) and not isinstance(number, bool):
+                merged[field] = number
+            elif isinstance(current.get(field), (int, float)) and not isinstance(current.get(field), bool):
+                merged[field] = current[field]
         if placeholder or merged != current:
             target[session_id] = merged
             changed = True
@@ -934,6 +975,7 @@ class Bar:
         version_file: Path | None = None,
         scale_file: Path | None = None,
         window_probe=None,
+        project: str | None = None,
     ) -> None:
         self.status_file = status_file
         self.current_session_file = current_session_file
@@ -943,6 +985,10 @@ class Bar:
         self.version_file = version_file or DEFAULT_VERSION_FILE
         self.scale_file = scale_file or DEFAULT_SCALE_FILE
         self.parent_pid = parent_pid
+        # The project this bar was spawned for. Several OpenCode instances share
+        # one totals file and one screen, so the bar names its project rather
+        # than assuming whichever session wrote last is the one on screen.
+        self.project = project or None
         self.desktop_tabs = DesktopTabs(desktop_database)
         self.desktop_window = DesktopWindow(
             probe=window_probe,
@@ -1285,15 +1331,48 @@ class Bar:
         self.canvas.create_line(tick_x - self.px(0.9), tick_y + self.px(3), tick_x + self.px(4), tick_y - self.px(3.4), fill=ACCENT_COLOR, width=width, capstyle="round")
         self.draw_text(x1 + self.px(26), tick_y, label, self.font_value, ACCENT_COLOR)
 
+    def resolve_session(self) -> str | None:
+        """The one session this bar is allowed to show, or None.
+
+        Every source below is a fact about a session the person is looking at.
+        When none of them can name one, the answer is None and the bar says it
+        has nothing to show — it never borrows another session's numbers, which
+        is what made a fresh session display somebody else's totals.
+        """
+        # The Desktop knows which tab is open, and publishes nothing when a tab
+        # is opened, so events alone stay frozen on the last session typed into.
+        tab = self.desktop_tabs.poll()
+        if isinstance(tab, str) and tab:
+            return tab
+        current = load_current_session(self.current_session_file, self.cache, self.project)
+        event_session = current.get("sessionID") if current else None
+        if isinstance(event_session, str) and event_session:
+            return event_session
+        # No current session published. Fall back to the most recently measured
+        # one, but only inside this bar's own project — or, with no project to
+        # match on, only when there is exactly one candidate and so no choice.
+        candidates = [
+            (session_id, values)
+            for session_id, values in self.best_totals.items()
+            if isinstance(values, dict) and (values.get("turns") or 0) > 0
+        ]
+        if self.project:
+            candidates = [entry for entry in candidates if entry[1].get("project") == self.project]
+        if len(candidates) == 1:
+            return candidates[0][0]
+        if candidates and self.project:
+            newest = max(candidates, key=lambda entry: str(entry[1].get("updatedAt") or ""))
+            return newest[0]
+        return None
+
     def render_totals(self, force: bool = False) -> None:
-        session_id = self.current_session_id or self.last_record_session_id
-        # A freshly opened tab has no totals yet: show the last measured session
-        # rather than crashing on a missing entry.
-        totals = (
-            self.best_totals.get(session_id)
-            or self.best_totals.get(self.last_record_session_id or "")
-            or {}
-        )
+        session_id = self.current_session_id
+        totals = self.best_totals.get(session_id) if session_id else None
+        if totals is None:
+            # Nothing measured for the session on screen. Saying so is the point:
+            # a number from another session here is worse than no number.
+            self.render_empty()
+            return
         turns = format_count(totals.get("turns"))
         steps = format_count(totals.get("steps"))
         rate = totals_rate(totals)
@@ -1302,6 +1381,7 @@ class Bar:
         key = (
             session_id or "", turns, steps, rate,
             round(recent, 1) if recent is not None else None,
+            totals.get("subagentSteps"),
             notice[0] if notice else None,
             self.close_hover, self.grip_hover, round(self.scale, 3), self.collapsed,
         )
@@ -1338,20 +1418,51 @@ class Bar:
             ("tok/s", self.font_unit, MUTED_COLOR, self.px(14) if recent is not None else 0),
         ]
         # The last-ten reading sits beside the session average it must not be
-        # mistaken for: same line, its own separator, its own tint, and its own
-        # label ("last10" = the mean of the last ten responses).
+        # mistaken for: same line, its own separator, its own tint, and a label
+        # that says what it averages. It is the mean rate of the last ten
+        # *responses*, not of the last ten steps — steps inside one response are
+        # not ten separate replies and averaging them answers nothing.
         if recent is not None:
             segments += [
                 ("·", self.font_unit, DIM_COLOR, self.px(6)),
                 (format_tps(recent), self.font_value, ACCENT_COLOR, self.px(3)),
-                ("last10", self.font_unit, MUTED_COLOR, 0),
+                ("last10 resp", self.font_unit, MUTED_COLOR, 0),
             ]
+        # Subagent work is counted inside this session's steps and tokens — a
+        # subagent runs as a child session, so its steps are this session's work.
+        # It gets no segment of its own: the card is sized for the metrics line,
+        # and the count lives in the record and the README instead.
         gauge_width = self.px(28.0)
         gap = self.px(13.0)
         total_width = gauge_width + gap + self.segments_width(segments)
         start_x = max(self.px(20), (self.width - total_width) / 2)
         self.draw_gauge(start_x + self.px(11), center_y, rate)
         self.draw_segments(start_x + gauge_width + gap, center_y, segments)
+
+    def render_empty(self, force: bool = False) -> None:
+        """Nothing measured for the session on screen. Name the reason, guess nothing."""
+        key = ("empty", self.close_hover, self.grip_hover, round(self.scale, 3), self.collapsed)
+        if not force and key == self.render_key:
+            return
+        self.render_key = key
+        self.canvas.delete("all")
+        center_y = self.height / 2
+        inset = self.px(2)
+        if self.collapsed:
+            self.draw_card(inset, inset, self.width - inset - 1, self.height - inset - 1, self.px(15))
+            self.draw_text(self.width / 2, self.px(21), "TOK/S", self.font_mini_caption, DIM_COLOR, anchor="center")
+            self.draw_text(self.width / 2, self.px(43), "—", self.font_mini_value, DIM_COLOR, anchor="center")
+            return
+        self.draw_card(inset, inset, self.width - inset - 1, self.height - inset - 1, self.px(14))
+        self.draw_close_button()
+        self.draw_resize_grip()
+        self.draw_gauge(self.px(31), center_y, None)
+        segments = [("waiting for a response", self.font_unit, MUTED_COLOR, 0)]
+        if self.project:
+            segments.append(("·", self.font_unit, DIM_COLOR, self.px(6)))
+            segments.append((self.project, self.font_unit, DIM_COLOR, 0))
+        start_x = max(self.px(20), (self.width - (self.px(28.0) + self.px(13.0) + self.segments_width(segments))) / 2)
+        self.draw_segments(start_x + self.px(28.0) + self.px(13.0), center_y, segments)
 
     def active_update_notice(self) -> tuple[str, int] | None:
         """Show a newly installed version once, for a few seconds, then the metrics.
@@ -1526,16 +1637,13 @@ class Bar:
                 pass
         self.desktop_window.poll()
         self.apply_window_visibility(self.desktop_window.should_hide())
-        current = load_current_session(self.current_session_file, self.cache)
-        event_session = current.get("sessionID") if current else None
-        # The Desktop's own record of the open tab wins: OpenCode publishes no
-        # event when a tab is opened, so events alone freeze on the last session
-        # that was typed into.
-        session_id = self.desktop_tabs.poll() or event_session or self.last_record_session_id
+        # Read the totals before resolving: the resolver's last fallback is a
+        # choice among known sessions, so it needs them loaded first.
+        self.refresh_totals()
+        session_id = self.resolve_session()
         if session_id != self.current_session_id:
             self.current_session_id = session_id
             self.render_key = None
-        self.refresh_totals()
         self.announce_pending_update()
         self.render_totals()
         self.root.after(POLL_MS, self.poll)
@@ -1638,6 +1746,7 @@ def main() -> int:
             Path(desktop_database) if desktop_database else None,
             version_file,
             scale_file,
+            project=os.environ.get("OPENCODE_LATENCY_PROJECT") or None,
         )
         try:
             return bar.run()

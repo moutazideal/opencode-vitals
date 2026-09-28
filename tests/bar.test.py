@@ -475,24 +475,77 @@ try:
     ui.root.update()
     check("close button calms on leave", ui.close_hover is False)
 
-    # A viewed session with no totals yet must not crash the bar: it shows the
-    # last measured session, and zeros only when nothing is known at all.
-    # A session with no totals must not crash, and it must not claim zero work:
-    # the last measured response is the honest thing to show.
+    # A session with no totals must not borrow another session's numbers. It used
+    # to: the bar fell back to the last session that published a record, so a
+    # freshly opened tab showed somebody else's turns and tok/s with nothing on
+    # screen to say so. The honest display is that nothing is measured yet.
     empty_totals = work / "empty-totals.json"
     empty_totals.write_text(json.dumps({"version": 1, "sessions": {}}), encoding="utf-8")
-    fallback_ui = bar.Bar(status, current_file, empty_totals, work / "fresh-best.json", position, 0, work / "absent-drafts.sqlite", work / "fallback-version.json")
+    fresh_current = work / "fresh-current.json"
+    fresh_current.write_text(json.dumps({"available": True, "sessionID": "ses_brand_new", "observedAt": time.time() * 1000}), encoding="utf-8")
+    fallback_ui = bar.Bar(status, fresh_current, empty_totals, work / "fresh-best.json", position, 0, work / "absent-drafts.sqlite", work / "fallback-version.json")
     fallback_ui.poll()
     fallback_ui.root.update()
-    check("session without totals shows the last measurement", shows(fallback_ui, "10", "turns") and shows(fallback_ui, "274", "tok/s"), " | ".join(texts_of(fallback_ui)))
+    fresh_texts = " | ".join(texts_of(fallback_ui))
+    check("a session with no totals shows nothing measured", shows(fallback_ui, "waiting for a response"), fresh_texts)
+    check("a session with no totals does not show another session's turns", not shows(fallback_ui, "12", "turns"), fresh_texts)
+    check("a session with no totals does not show another session's rate", not shows(fallback_ui, "400", "tok/s"), fresh_texts)
     fallback_ui.shutdown()
 
-    # Nothing measured at all: zeros and a dash are the honest display.
-    blank_ui = bar.Bar(work / "no-such-status.json", current_file, empty_totals, work / "blank-best.json", position, 0, work / "absent-drafts.sqlite", work / "no-such-version.json")
+    # Nothing measured at all, and no session resolved either: same honest state.
+    blank_ui = bar.Bar(work / "no-such-status.json", work / "no-such-current.json", empty_totals, work / "blank-best.json", position, 0, work / "absent-drafts.sqlite", work / "no-such-version.json")
     blank_ui.poll()
     blank_ui.root.update()
-    check("nothing measured renders zeros and a dash", shows(blank_ui, "0", "turns") and shows(blank_ui, "0", "steps") and shows(blank_ui, "–", "tok/s"), " | ".join(texts_of(blank_ui)))
+    check("nothing measured and no session waits", shows(blank_ui, "waiting for a response"), " | ".join(texts_of(blank_ui)))
     blank_ui.shutdown()
+
+    # Two projects share one totals file. The bar is spawned by one plugin, so it
+    # knows its project and must never show the other project's session.
+    shared_totals = work / "shared-totals.json"
+    shared_totals.write_text(json.dumps({"version": 1, "sessions": {
+        "ses_mine": {"turns": 7, "steps": 70, "outputTokens": 700, "generatedTokens": 700,
+                     "activeStreamMs": 2000, "tokensPerSecond": 350, "updatedAt": "2026-09-27T10:00:00.000Z",
+                     "project": "alpha"},
+        "ses_theirs": {"turns": 99, "steps": 990, "outputTokens": 9900, "generatedTokens": 9900,
+                       "activeStreamMs": 2000, "tokensPerSecond": 4950, "updatedAt": "2026-09-28T10:00:00.000Z",
+                       "project": "beta"},
+    }}), encoding="utf-8")
+    scoped_current = work / "scoped-current.json"
+    scoped_current.write_text(json.dumps({"version": 2, "observedAt": time.time() * 1000, "projects": {
+        "alpha": {"available": True, "sessionID": "ses_mine", "observedAt": time.time() * 1000},
+        "beta": {"available": True, "sessionID": "ses_theirs", "observedAt": time.time() * 1000},
+    }}), encoding="utf-8")
+    scoped_ui = bar.Bar(work / "no-such-status.json", scoped_current, shared_totals, work / "scoped-best.json", position, 0, work / "absent-drafts.sqlite", work / "scoped-version.json", project="alpha")
+    scoped_ui.poll()
+    scoped_ui.root.update()
+    scoped_texts = " | ".join(texts_of(scoped_ui))
+    check("the bar shows its own project's session", shows(scoped_ui, "7", "turns") and shows(scoped_ui, "350", "tok/s"), scoped_texts)
+    check("the bar does not show the other project", not shows(scoped_ui, "99", "turns") and not shows(scoped_ui, "4950", "tok/s"), scoped_texts)
+    scoped_ui.shutdown()
+
+    # A current-session file with no entry for this project resolves to nothing
+    # rather than to the project that happens to have written last.
+    other_current = work / "other-current.json"
+    other_current.write_text(json.dumps({"version": 2, "observedAt": time.time() * 1000, "projects": {
+        "beta": {"available": True, "sessionID": "ses_theirs", "observedAt": time.time() * 1000},
+    }}), encoding="utf-8")
+    alone_ui = bar.Bar(work / "no-such-status.json", other_current, shared_totals, work / "alone-best.json", position, 0, work / "absent-drafts.sqlite", work / "alone-version.json", project="alpha")
+    alone_ui.poll()
+    alone_ui.root.update()
+    alone_texts = " | ".join(texts_of(alone_ui))
+    check("a project with no current session does not borrow beta's", not shows(alone_ui, "99", "turns"), alone_texts)
+    check("it falls back to its own newest measured session", shows(alone_ui, "7", "turns"), alone_texts)
+    alone_ui.shutdown()
+
+    # v1 files are still read, so a bar and a plugin from different versions can
+    # overlap during an update instead of blanking the bar.
+    v1_current = work / "v1-current.json"
+    v1_current.write_text(json.dumps({"available": True, "sessionID": "ses_mine", "observedAt": time.time() * 1000}), encoding="utf-8")
+    v1_ui = bar.Bar(work / "no-such-status.json", v1_current, shared_totals, work / "v1-best.json", position, 0, work / "absent-drafts.sqlite", work / "v1-version.json", project="alpha")
+    v1_ui.poll()
+    v1_ui.root.update()
+    check("a v1 current-session file is still read", shows(v1_ui, "7", "turns"), " | ".join(texts_of(v1_ui)))
+    v1_ui.shutdown()
 
     # click on the × collapses, click on the mini square restores
     ui.on_press(Event(x=ui.width - 10, y=ui.height / 2))
@@ -550,10 +603,10 @@ try:
     write_totals()
     check("no last-ten reading is drawn without rates", "last10" not in texts(), " | ".join(texts()))
     write_totals(recentRates=[400, 500])
-    check("the last-ten reading is drawn", shows(ui, "600", "tok/s", "·", "450", "last10"), " | ".join(texts()))
+    check("the last-ten reading is drawn", shows(ui, "600", "tok/s", "·", "450", "last10 resp"), " | ".join(texts()))
     write_totals(recentRates=[400, 200, 900])
     check("the average stays the session average", shows(ui, "600", "tok/s"), " | ".join(texts()))
-    check("the last-ten reading follows its own list", shows(ui, "·", "500", "last10"), " | ".join(texts()))
+    check("the last-ten reading follows its own list", shows(ui, "·", "500", "last10 resp"), " | ".join(texts()))
 
     # --- resizing: the bar is the user's to size -------------------------------
     check("the bar starts at its base size", (ui.width, ui.height) == (bar.NORMAL_WIDTH, bar.NORMAL_HEIGHT), (ui.width, ui.height))

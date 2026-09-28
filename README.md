@@ -112,7 +112,7 @@ OpenCode Vitals puts that number on your screen, in the corner, all session long
 ## What you get
 
 ```
-◔  34 turns   210 steps   318 tok/s   · 331 last10
+◔  34 turns   210 steps   318 tok/s   · 331 last10 resp
 ```
 
 Every feature, in one place:
@@ -120,14 +120,16 @@ Every feature, in one place:
 | Feature | What it does |
 | --- | --- |
 | **Session average** | Turns, steps and average streaming tok/s for the session you are looking at, so one fast reply cannot flatter a long session. |
-| **Last ten responses** | `· N last10` is the mean of the rates of the last ten completed responses, next to the session average. The session average is the whole session divided as one sum; this one moves as soon as a slow reply lands, which is what tells you the session just changed character. A response with no honest rate is skipped, not counted as a zero. |
-| **Always on top** | 390×54 pixels by default, undecorated, no taskbar entry, no focus steal, slightly transparent. |
+| **Last ten responses** | `· N last10 resp` is the mean of the rates of the last ten completed **responses**, next to the session average. The session average is the whole session divided as one sum; this one moves as soon as a slow reply lands, which is what tells you the session just changed character. A response with no honest rate is skipped, not counted as a zero. It counts responses, not steps: the steps inside one reply are not ten separate answers, and averaging them would answer a question nobody asked. |
+| **Subagent work is counted** | A subagent runs as a session of its own, so its steps and tokens are added to the session that delegated the work. Its own streaming time is **not** — the session's tok/s stays a speed that session actually ran at, and the subagent's own rate stays on its own session. |
+| **Your project, your numbers** | Every OpenCode instance on the machine shares one status directory. The bar is told which project spawned it and shows only that project's sessions. A session with nothing measured yet says so instead of displaying another session's totals. |
+| **Always on top** | 450×54 pixels by default, undecorated, no taskbar entry, no focus steal, slightly transparent. |
 | **Any size you like** | Drag the bottom-right grip to resize, or hold **Ctrl** and use the wheel. Everything scales together — card, dial and text — the aspect ratio stays, and the size is remembered. **Right-click** resets it to 100%. |
 | **Move it anywhere** | Drag the body; the position is remembered. `OPENCODE_LATENCY_POSITION` picks the first corner instead. |
 | **Collapse** | Click the × and the bar shrinks to a small square that keeps showing tok/s; click the square to bring it back. The collapsed bar scales with the same size setting. |
 | **It follows your tab** | Switch sessions in the Desktop app and the bar switches with it (reads one row, `tabs.recent`, read-only). |
 | **It follows your attention** | Minimize the OpenCode window, switch to another program, or let a window cover OpenCode, and the bar steps aside; come back and it returns. Linux/X11, and fail-open: when it cannot tell, the bar stays. |
-| **It leaves when you do** | Close OpenCode and the bar exits with it; nothing is left on screen. |
+| **It leaves when you do** | Close OpenCode and the bar exits with it; nothing is left on screen. It also stands down after 15 minutes with no measured response, so a service that is running but idle is not a bar you have to close by hand. |
 | **It tells you when it updated** | A new version announces itself once, in place of the numbers. |
 | **You can check what is running** | `npx opencode-vitals selftest` prints the loaded version, the previous one, and every fact the bar depends on. |
 
@@ -341,6 +343,7 @@ Environment variables, for the bar and for the curious:
 | `OPENCODE_LATENCY_HIDE_UNFOCUSED` | `1` | `0` keeps the bar visible when another program takes focus. |
 | `OPENCODE_LATENCY_HIDE_OCCLUDED` | `1` | `0` keeps the bar visible when another window covers OpenCode. |
 | `OPENCODE_LATENCY_DESKTOP_DB` | detected | Where the Desktop app keeps its state database. |
+| `OPENCODE_LATENCY_PROJECT` | set by the plugin | The project this bar serves. Set by the plugin; setting it by hand pins one project's numbers on the screen. |
 
 The bar's own files (`OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_CURRENT_FILE`,
 `OPENCODE_LATENCY_TOTALS_FILE`, `OPENCODE_LATENCY_BEST_TOTALS_FILE`, `OPENCODE_LATENCY_POSITION_FILE`,

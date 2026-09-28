@@ -25,7 +25,10 @@
 
 ---
 
-## Quick install
+## Install
+
+Three ways. The first needs nothing on your machine but Node — no clone, no editing a config file —
+so it is the one to start with.
 
 **1 — Check your machine first.** It takes ten seconds and tells you whether the bar can run here:
 
@@ -45,10 +48,10 @@ one `npx` just downloaded.
 
 **3 — Restart OpenCode.** The bar is on screen within seconds.
 
-### Other ways to install
+### Let OpenCode keep the plugin up to date
 
-Add one line to `opencode.json` or `opencode.jsonc` instead, and OpenCode installs and updates the
-package itself:
+Instead of a command, add one line to `opencode.json` or `opencode.jsonc`. OpenCode then installs the
+package and updates it itself at startup, and the install command above is never needed:
 
 ```jsonc
 {
@@ -57,9 +60,34 @@ package itself:
 }
 ```
 
-Or copy the folder to `~/.config/opencode/plugins/opencode-vitals/` and OpenCode finds it with no
-command at all. Want to change the history size or turn the bar off? Use the object form in
-[Options](#options).
+To pass options — a different history size, or the bar off — use the object form:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "opencode-vitals",
+      "options": {
+        "popup": true
+      }
+    }
+  ]
+}
+```
+
+See [Options](#options) for what the object takes.
+
+### Or copy the folder
+
+Files in the plugin directory are loaded automatically, with no configuration and no command at all:
+
+```bash
+mkdir -p ~/.config/opencode/plugins
+cp -r opencode-vitals ~/.config/opencode/plugins/opencode-vitals
+```
+
+Working on the source instead? See [For developers](#for-developers).
 
 ### The install command
 
@@ -70,7 +98,6 @@ npx opencode-vitals selftest      # can this machine draw the bar?
 npx opencode-vitals status        # what is installed, and which version
 npx opencode-vitals uninstall     # remove it again
 
-npx opencode-vitals install --link       # symlink instead, while working on the source
 npx opencode-vitals install --dir PATH   # use a plugin directory you choose
 ```
 
@@ -192,58 +219,6 @@ If the provider reports no token counts, `tok/s` shows `–` instead of guessing
 (`firstTokenMs`, `firstTextMs`, `firstCharMs`, `totalMs`, `activeStreamMs`, `toolArgCharacters`,
 `rateSource`, per-model and per-agent token counts) stays in the plugin's own storage, capped at 100
 records, if you want to compute something else.
-
-## Install
-
-OpenCode installs npm plugins itself with Bun at startup, so installing is one config entry and a
-restart.
-
-### From npm, with options
-
-```jsonc
-// opencode.json or opencode.jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    {
-      "package": "opencode-vitals",
-      "options": {
-        "popup": true
-      }
-    }
-  ]
-}
-```
-
-### From npm, defaults only
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-vitals"]
-}
-```
-
-Restart OpenCode and the bar is there within seconds.
-
-### By copying the folder
-
-Files in the plugin directory are loaded automatically, with no configuration at all:
-
-```bash
-mkdir -p ~/.config/opencode/plugins
-cp -r opencode-vitals ~/.config/opencode/plugins/opencode-vitals
-```
-
-### From source, while you work on it
-
-```bash
-git clone https://github.com/moutazideal/opencode-vitals.git
-ln -s "$PWD/opencode-vitals" ~/.config/opencode/plugins/opencode-vitals
-```
-
-Edits reach the running plugin within five seconds — no restart. Keep the link under the folder name
-OpenCode already discovered, or the running instance will be left pointing at nothing.
 
 ## Requirements
 
@@ -419,10 +394,31 @@ When the module is evaluated it compares its own `package.json` version with the
 - the plugin log reads `updated 0.1.5 -> 0.2.0`;
 - the selftest prints `running <new>, package <new>` and the previous version when there was one.
 
-## Development
+## For developers
+
+### Work on it from source
 
 ```bash
-npm test           # 223 plugin checks + 135 bar checks
+git clone https://github.com/moutazideal/opencode-vitals.git
+cd opencode-vitals
+npm install
+npx opencode-vitals install --link
+```
+
+That symlinks the checkout into the plugin directory instead of copying it, so edits reach the
+running plugin within five seconds and no restart is needed. Keep the link under the folder name
+OpenCode already discovered, or the running instance will be left pointing at nothing.
+
+`npx opencode-vitals status` then reports `link` rather than `copy`, and `npx opencode-vitals
+uninstall` removes the link without touching your checkout.
+
+To install a copy of the checkout instead, drop the `--link`. To put it somewhere else, add
+`--dir PATH`.
+
+### Development
+
+```bash
+npm test           # 250 plugin checks + 142 bar checks
 npm run selftest   # does the bar work on this machine?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first
@@ -442,12 +438,18 @@ opencode-vitals/
     └── bar.test.py     bar behaviour, lock, Desktop tab tracking
 ```
 
+Releases are cut by `.github/workflows/release.yml`: bump the version in `package.json`, add the
+changelog section, commit. The workflow reads the version, runs the suite, tags and publishes, and
+skips a version that is already tagged. A missing changelog entry fails the run rather than
+publishing a release with no notes.
+
 The test suite includes the mistakes worth catching twice: zombie holders in the singleton lock, a
-session with no totals yet (which must fall back to the last measurement instead of claiming zero
-work), a WAL write that leaves the database timestamp untouched, process checks on macOS and
-Windows driven by a fake process list so their logic is verified even though their hardware was
-not, a turn whose tokens were counted while the time spent writing its tool call was not, and a
-window that covers OpenCode while focus never left it.
+session with no totals yet (which must say it has nothing to show rather than borrow another
+session's numbers), two projects sharing one status directory, a subagent's tokens reaching its
+parent's rate without its stream time, a WAL write that leaves the database timestamp untouched,
+process checks on macOS and Windows driven by a fake process list so their logic is verified even
+though their hardware was not, a turn whose tokens were counted while the time spent writing its
+tool call was not, and a window that covers OpenCode while focus never left it.
 
 ## License
 

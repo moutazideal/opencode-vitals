@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-09-28
+
+The idle window is ten seconds, and it no longer mistakes a slow reply for an
+idle machine.
+
+### Fixed
+
+- **A long reply took the bar down with it.** The idle window was measured from
+  the last *finished* response, so a reply that streamed for a minute — before
+  any record existed — put the bar away at the exact moment its numbers were
+  worth reading. Liveness is now stamped by any event for a session, so work in
+  progress keeps the bar up.
+- **A replayed batch of events could pass for a live session.** The stamp used
+  the event's own `created`, and a replayed event carries the time it was
+  recorded, not the time it arrived. It is the arrival time now.
+- The companion tick is 1s, down from 5s, so the bar leaves inside the ten
+  seconds it promises instead of at the next five-second boundary.
+
+### Changed
+
+- `IDLE_HIDE_MS` is 10 seconds, down from fifteen minutes, and `COMPANION_TICK_MS`
+  is 1s. Both are exported. A session that has never sent an event still keeps
+  the bar, so a first run is not a bar that never appears.
+
+### Measured
+
+- 250 plugin checks and 142 bar checks, unchanged from 0.1.6 in count and
+  different in content: the idle cases now pin that activity beats a finished
+  record, that a replayed event counts as activity now, that the tick fits
+  inside the window, and that the same runtime stands the bar down once the
+  events stop.
+
 ## [0.1.6] - 2026-09-28
 
 The bar stopped showing you somebody else's numbers, and stopped ignoring the
@@ -35,8 +67,14 @@ work you delegated.
 - **A bar outlived every session it was measuring.** Whether a bar belongs on the
   screen was decided from the OpenCode process being alive, and a service stays
   alive with nothing open, so the bar stayed up for a program nobody was using.
-  It now stands down after fifteen minutes with no measured response. A session
-  that has never been measured keeps the bar, so a first run still shows it.
+  It now stands down ten seconds after the last event from a session. A session
+  that has never sent an event keeps the bar, so a first run still shows it.
+- **A long reply no longer takes the bar down with it.** The idle window counts
+  any event, not a finished response, so a reply that streams for a minute keeps
+  the bar on screen — which is when it is worth reading. The stamp is the
+  arrival time and not the event's own `created`, so a replayed batch of old
+  events cannot pass as a live session. The companion tick is 1s, so the bar
+  leaves within the ten seconds it promises rather than at the next multiple.
 - The `last10` label now reads `last10 resp`. It is the mean rate of the last ten
   **responses** and always was; the steps inside one reply are not ten separate
   answers. The card is 450 pixels wide to fit the clearer label.
@@ -57,13 +95,16 @@ work you delegated.
 
 ### Measured
 
-- 246 plugin checks and 142 bar checks, up from 223 and 135. The bar suite grew
+- 250 plugin checks and 142 bar checks, up from 223 and 135. The bar suite grew
   by seven checks that pin the new attribution rules: no borrowing another
   session's numbers, per-project isolation, a v1 file still readable, and the
   delegated work counted in the parent without touching its rate. The plugin
   suite grew by nine: the subagent credit and every way it must not leak into
   the parent's rate, a root session, a missing session API, the project on the
-  record, the per-project current-session map, and the idle stand-down.
+  record, and the per-project current-session map. The idle rules are pinned as
+  well: a session active now keeps the bar, an idle one loses it, a session never
+  heard from keeps it, the tick fits inside the window, and a replayed event
+  counts as activity now rather than as the hour-old stamp it carries.
 
 ## [0.1.5] - 2026-09-26
 
@@ -375,6 +416,7 @@ The first public release.
   logic is covered by tests driven by a fake process list, but no macOS or
   Windows machine has run it yet.
 
+[0.1.7]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.7
 [0.1.6]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.6
 [0.1.5]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.5
 [0.1.4]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.4

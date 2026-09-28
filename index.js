@@ -82,11 +82,12 @@ const SUBAGENT_FIELDS = ["subagentTurns", "subagentSteps"]
 // turn is already complete and its numbers are already known.
 const SESSION_LOOKUP_TIMEOUT_MS = 2000
 // How often the plugin reconsiders whether a bar belongs on the screen, and how
-// long a measured session may go without producing a record before the bar
-// stands down. OpenCode keeps running with no session open, and a measurement
-// bar outliving every session it was measuring is the bug this pair removes.
-const COMPANION_TICK_MS = 5000
-const IDLE_HIDE_MS = 15 * 60 * 1000
+// long a session may go without any event before the bar stands down. OpenCode
+// keeps running with no session open, and a measurement bar outliving every
+// session it was measuring is the bug this pair removes. The tick is a fraction
+// of the idle window so the bar leaves when it says it will.
+const COMPANION_TICK_MS = 1000
+const IDLE_HIDE_MS = 10_000
 // The OpenCode service is supervised by systemd and outlives the Desktop app, so
 // the bar cannot be tied to the plugin process alone. No server event reports a
 // client disconnect, so the app process itself is the signal.
@@ -309,8 +310,8 @@ function desktopAppAlive() {
 // question: the process outlives the sessions that use it, so a bar keyed to
 // process existence stays up for a program nobody is looking at any more.
 function barExpectedFrom({ desktopEnv, desktopAlive, lastDesktopSeenAt, now, openSessionAt }) {
-  // Someone has to have measured something. Before the first turn there is
-  // nothing to show, and a bar with nothing on it is just an overlay.
+  // A session has to be doing something. An idle OpenCode is a service with
+  // nothing to measure, and a bar over it is an overlay nobody asked for.
   if (openSessionAt !== undefined && now - openSessionAt > IDLE_HIDE_MS) return false
   if (desktopEnv !== "desktop") return true
   if (desktopAlive) return true
@@ -836,7 +837,9 @@ function createState(rawOptions, context = {}) {
   let storage
   let persistChain = Promise.resolve()
   let currentSession = { known: false, id: null }
-  let lastMeasuredAt = null
+  // The last time any event for a measured session arrived, not the last time a
+  // response finished: a reply in progress is the bar at its most useful.
+  let lastEventAt = null
 
   function writeLine(ctx, line, level) {
     // One sink, not two: OpenCode's own logger when the host offers it, the
@@ -932,11 +935,11 @@ function createState(rawOptions, context = {}) {
   }
 
   // The companion tick asks whether a bar still belongs on the screen, and the
-  // answer depends on when a record was last produced. Publishing one is the
-  // proof that a session is live, so this is set where a record is written
-  // rather than on a timer of its own.
-  function noteMeasuredFor(runtime) {
-    if (lastMeasuredAt !== null) runtime.openSessionAt = lastMeasuredAt
+  // answer is "was anything measured recently". Activity, not a completed
+  // record: a long reply streams deltas for a minute before it finishes, and a
+  // bar that stood down mid-reply would leave exactly when it is worth reading.
+  function noteActivityFor(runtime) {
+    if (lastEventAt !== null) runtime.openSessionAt = lastEventAt
   }
 
   function refreshCurrentSession() {
@@ -1637,7 +1640,6 @@ function createState(rawOptions, context = {}) {
         : generatedTokens / totalSeconds,
       completedAt: new Date(completedAt).toISOString(),
     }
-    lastMeasuredAt = completedAt
     record.sessionTotals = updateSessionTotals(sessionID, record)
     // Work this session delegated is credited to whoever asked for it, so a
     // parent session's steps are the work it caused and not only the replies it
@@ -1687,6 +1689,12 @@ function createState(rawOptions, context = {}) {
     }
     const sessionID = readSessionID(value)
     if (!sessionID) return
+    // Any event for a session is proof the session is live, including the ones
+    // this plugin does not measure. Stamped before the dispatch below so an
+    // ignored or unknown event still counts as activity. This is the arrival
+    // time and not the event's own `created`: a replayed event is old, and
+    // liveness is about now.
+    lastEventAt = now()
 
     if (type === "session.viewed") {
       setCurrentSessionId(sessionID)
@@ -1871,6 +1879,7 @@ function createState(rawOptions, context = {}) {
     handle,
     setCurrentSessionId,
     refreshCurrentSession,
+    noteActivityFor,
     unknownEventTypes: summarizeUnknownEvents,
   }
 }
@@ -1896,6 +1905,7 @@ export const vitalsInternals = {
   CURRENT_SESSION_FILE,
   projectKeyFor,
   barExpectedFrom,
+  runtimeFor,
   scanDesktopProcess,
   processListDecision,
   barExpectedFrom,
@@ -1941,7 +1951,7 @@ export default {
     // the bar itself leaves when the OpenCode app is closed.
     if (state.options.popup) {
       companionTimer = setInterval(() => {
-        state.noteMeasuredFor(runtime)
+        state.noteActivityFor(runtime)
         if (barExpected(runtime)) startPopup(runtime)
         else void stopPopup()
         state.refreshCurrentSession()

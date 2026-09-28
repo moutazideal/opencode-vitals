@@ -129,7 +129,7 @@ Every feature, in one place:
 | **Collapse** | Click the × and the bar shrinks to a small square that keeps showing tok/s; click the square to bring it back. The collapsed bar scales with the same size setting. |
 | **It follows your tab** | Switch sessions in the Desktop app and the bar switches with it (reads one row, `tabs.recent`, read-only). |
 | **It follows your attention** | Minimize the OpenCode window, switch to another program, or let a window cover OpenCode, and the bar steps aside; come back and it returns. Linux/X11, and fail-open: when it cannot tell, the bar stays. |
-| **It leaves when you do** | Close OpenCode and the bar exits with it; nothing is left on screen. It also stands down after 15 minutes with no measured response, so a service that is running but idle is not a bar you have to close by hand. |
+| **It leaves when you do** | Close OpenCode and the bar exits with it; nothing is left on screen. It also stands down **10 seconds** after the last event from a session, so a service that is running but idle is not a bar you have to close by hand. Any event counts, not just a finished reply: a response that is still streaming keeps the bar up, because that is when its numbers are worth reading. |
 | **It tells you when it updated** | A new version announces itself once, in place of the numbers. |
 | **You can check what is running** | `npx opencode-vitals selftest` prints the loaded version, the previous one, and every fact the bar depends on. |
 

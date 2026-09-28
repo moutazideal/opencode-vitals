@@ -543,15 +543,20 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("closed app hides bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: now - 60_000, now }) === false)
   check("long absence restores bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: now - grace - 1, now }) === true)
 
-  // A measurement bar must not outlive every session it was measuring. OpenCode
+  // A measurement bar must not outlive the session it is measuring. OpenCode
   // keeps running with nothing open, and process existence is not usage.
   const idle = vitalsInternals.IDLE_HIDE_MS
-  check("a session measured just now keeps the bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - 60_000, now }) === true)
+  check("a session active just now keeps the bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - 1_000, now }) === true)
   check("an idle install stands the bar down", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - idle - 1, now }) === false)
   check("idle stands the bar down on the desktop too", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: true, openSessionAt: now - idle - 1, now }) === false)
   check("a session never measured keeps the bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: undefined, now }) === true)
-  check("the companion tick is frequent enough to notice", vitalsInternals.COMPANION_TICK_MS <= 10_000, vitalsInternals.COMPANION_TICK_MS)
-  check("the idle window is long enough to work in", vitalsInternals.IDLE_HIDE_MS >= 10 * 60 * 1000, vitalsInternals.IDLE_HIDE_MS)
+  // The bar must leave when it says it will: one tick has to fit inside the
+  // window, or the promise is "some time after ten seconds".
+  check("the tick fits inside the idle window", vitalsInternals.COMPANION_TICK_MS < vitalsInternals.IDLE_HIDE_MS, [vitalsInternals.COMPANION_TICK_MS, vitalsInternals.IDLE_HIDE_MS])
+  check("the idle window is the ten seconds asked for", vitalsInternals.IDLE_HIDE_MS === 10_000, vitalsInternals.IDLE_HIDE_MS)
+  // A reply in progress streams for a while before it finishes, so liveness is
+  // stamped by any event and not by a completed record.
+  check("a session mid-reply keeps the bar past the window", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - idle + 2_000, now }) === true)
 }
 
 // 18. Closing the app stops the running bar, proven in an isolated status dir.
@@ -1404,6 +1409,32 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   cleanup()
   if (previous !== null) writeFileSync(totalsPath, previous)
   else rmSync(totalsPath, { force: true })
+}
+
+// The bar's lifetime follows activity, not finished responses: a long reply is
+// streaming for a while before it completes, and a bar that stood down mid-reply
+// would leave exactly when its numbers are worth reading.
+{
+  const streaming = `ses_strm${unique.slice(0, 15)}`
+  const started = Date.now()
+  const events = [
+    envelope("session.execution.started", { sessionID: streaming }, started),
+    envelope("session.step.started", { sessionID: streaming, assistantMessageID: "msg_s" }, started + 10),
+    envelope("session.text.delta", { sessionID: streaming, assistantMessageID: "msg_s", delta: "a" }, started + 20),
+  ]
+  // A stale `created` on a replayed event must not read as liveness: the arrival
+  // time is what counts. The companion tick writes the stamp onto the runtime it
+  // polls, so that is what the test reads: the real path, not a probe.
+  const replayed = events.map((event) => ({ ...event, created: started - 3_600_000 }))
+  const directory = `/tmp/opencode/latency-replay-${Math.random()}`
+  const { cleanup } = await run(replayed, { pluginOptions: { popup: true }, location: { directory } })
+  await wait(1_500)
+  const runtime = vitalsInternals.runtimeFor(directory)
+  check("a replayed event still counts as activity now", typeof runtime.openSessionAt === "number" && Date.now() - runtime.openSessionAt < 5_000, JSON.stringify(runtime.openSessionAt))
+  check("the bar is expected while events are arriving", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: runtime.openSessionAt, now: Date.now() }) === true)
+  // And once the events stop, the same runtime stands the bar down.
+  check("the bar is dropped once the session goes quiet", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: runtime.openSessionAt, now: runtime.openSessionAt + vitalsInternals.IDLE_HIDE_MS + 1 }) === false)
+  cleanup()
 }
 
 // A root session has no parent, and a session API that cannot answer must not

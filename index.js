@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { serve, syncRenderer } from "./readout.mjs"
+import { installDesktopEntry, serve, syncRenderer } from "./readout.mjs"
+import { START_DELAY_MS, updateIfNeeded } from "./update.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
 // The status directory and the OPENCODE_LATENCY_* variables keep the name this
@@ -124,6 +125,9 @@ function withTimeout(promise, milliseconds) {
 let readoutServer = null
 // Latches so a persistent failure is reported once rather than every second.
 let readoutPlacementWarned = false
+// The same latch for the launcher entry: a machine with no desktop app is a
+// machine that will never get one, and being told so on every launch is noise.
+let readoutEntryWarned = false
 
 // One server for the machine, many plugin instances behind it: OpenCode loads
 // this plugin once per project and they all share a process. The server cannot
@@ -1667,6 +1671,20 @@ export default {
     const state = createState(ctx.options, { project })
     let companionTimer = null
     let markerTimer = null
+    // The update check, deliberately late and deliberately cancellable. Late,
+    // because a launch that stalls behind a package manager is a launch that
+    // looks broken; cancellable, because a plugin that unloaded must not leave a
+    // timer behind holding a reference to a state it no longer answers for.
+    let updateTimer = null
+    const later = (work) => {
+      updateTimer = setTimeout(() => {
+        updateTimer = null
+        void work()
+      }, START_DELAY_MS)
+      // Unref'd so a plugin that has nothing else to do does not keep the
+      // process alive for fifteen seconds waiting to check npm.
+      updateTimer.unref?.()
+    }
     const cleanup = () => {
       controller.abort()
       if (companionTimer && runtime.companionTimer === companionTimer) {
@@ -1675,6 +1693,7 @@ export default {
       }
       if (markerTimer) clearInterval(markerTimer)
       if (runtime.markerTimer === markerTimer) runtime.markerTimer = null
+      if (updateTimer) clearTimeout(updateTimer)
       if (runtime.controller === controller) runtime.controller = null
       // A reloaded instance must not keep answering for a session it no longer
       // measures: the state leaves the pool with its cleanup.
@@ -1724,6 +1743,25 @@ export default {
     // copy they are reading about is the copy that is running, so it is printed
     // whether or not per-turn logging is on.
     if (version.changed) state.warn(ctx, `updated ${version.previous ?? "none"} -> ${version.version}`)
+    // The readout's own launcher entry is written here rather than only by the
+    // installer, because the supported way to install this plugin is
+    // `opencode plugin add`, which runs none of our code: the package is fetched
+    // by OpenCode in the background and the first thing to execute is this file.
+    // A plugin that only set itself up when its own installer ran would be a
+    // plugin with no readout, which is the state this is here to prevent.
+    try {
+      const entry = installDesktopEntry()
+      // "no app" is not a fault: a headless or TUI-only machine measures the same
+      // numbers and simply has no window to draw them in. Warning about it on
+      // every launch would teach people to ignore this plugin's warnings.
+      if (!entry.ok && entry.reason !== "no app" && !readoutEntryWarned) {
+        readoutEntryWarned = true
+        state.warn(null, `readout launcher entry not installed: ${entry.reason}`)
+      }
+    } catch (error) {
+      state.warn(null, `readout launcher entry not installed: ${String(error)}`)
+    }
+    void later(() => updateIfNeeded({ onReport: (message) => state.warn(null, message) }))
 
     if (!ctx.event?.subscribe) {
       state.warn(ctx, "event subscription unavailable; measurement is disabled")

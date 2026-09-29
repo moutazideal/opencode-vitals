@@ -18,6 +18,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  writeFileSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -28,8 +29,9 @@ import {
   symlinkSync,
 } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import { dirname, join, resolve, sep } from "node:path"
+import { basename, dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { compareVersions } from "./update.mjs"
 
 // A closed pipe (someone piped us into head) is not a failure: swallow EPIPE
 // instead of printing a stack trace and exiting non-zero.
@@ -122,6 +124,132 @@ const FALLBACK_FILES = [
   "docs/desktop.png",
 ]
 
+// -- finding OpenCode ---------------------------------------------------------
+//
+// This has to be careful in one specific way. On a desktop install, `opencode` on
+// PATH is a symlink to the Electron application, and running it to see whether it
+// works would launch a second copy of the app. So a candidate is never executed to
+// be tested: it is read, and a link is followed by reading it, because the name
+// on the far end is the only thing that says whether it is a CLI at all.
+const CLI_NAMES = new Set(["opencode", "opencode-cli", "opencode.exe"])
+
+function resolveLink(path, depth = 0) {
+  // Bounded, because a link loop is a thing a file can be.
+  if (depth > 8) return path
+  let target
+  try {
+    target = readlinkSync(path)
+  } catch {
+    return path
+  }
+  return resolveLink(resolve(dirname(path), target), depth + 1)
+}
+
+export function findOpenCodeCli({ env = process.env, home = homedir() } = {}) {
+  const seen = new Set()
+  const consider = (raw) => {
+    if (!raw || seen.has(raw)) return null
+    seen.add(raw)
+    let path = resolve(String(raw))
+    if (path.endsWith(sep)) path = path.slice(0, -1)
+    path = resolveLink(path)
+    if (!CLI_NAMES.has(basename(path).toLowerCase())) return null
+    return existsSync(path) ? path : null
+  }
+
+  // An explicit answer beats a search, which is the only reason to have one.
+  const named = consider(env.OPENCODE_CLI)
+  if (named) return named
+
+  // The CLI the desktop app ships, newest version last. It is the one that is
+  // guaranteed to be the same build as the plugin host that will load us.
+  for (const root of [
+    join(home, ".config", "ai.opencode.desktop", "cli"),
+    join(env.XDG_DATA_HOME ?? join(home, ".local", "share"), "ai.opencode.desktop", "cli"),
+  ]) {
+    let versions
+    try {
+      versions = readdirSync(root)
+    } catch {
+      continue
+    }
+    // Newest first, and "newest" is not the same as "last in a string sort": these
+    // directories are version numbers, so 2.0.9 sorts after 2.0.19 in text.
+    // Registering a plugin with a CLI older than the one that will load it is how
+    // a config file ends up in a shape its own host cannot read.
+    versions.sort((left, right) => compareVersions(right, left))
+    for (const version of versions) {
+      const found = consider(join(root, version, "opencode-cli"))
+      if (found) return found
+    }
+  }
+
+  for (const dir of (env.PATH ?? "").split(":")) {
+    if (!dir) continue
+    const found = consider(join(dir, "opencode"))
+    if (found) return found
+  }
+  return null
+}
+
+export function runCli(cli, args, { timeout = 120_000, spawn: run = spawnSync } = {}) {
+  let result
+  try {
+    result = run(cli, args, { encoding: "utf8", timeout, stdio: ["ignore", "pipe", "pipe"] })
+  } catch (error) {
+    return { ok: false, reason: String(error) }
+  }
+  const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim()
+  if (result.error) return { ok: false, reason: String(result.error) }
+  if (result.status !== 0) {
+    // The last line, because that is where a package manager puts the reason, and
+    // a plugin's log line wants to be one line. The lines above it are progress
+    // and warnings that would only make the message harder to read.
+    const last = output.split("\n").map((line) => line.trim()).filter(Boolean).at(-1)
+    return { ok: false, reason: last || `exited ${result.status}` }
+  }
+  return { ok: true, output }
+}
+
+// -- the supported install ----------------------------------------------------
+//
+// OpenCode resolves plugins named in its own config: it fetches the package,
+// records the version, and checks unpinned ones for updates whenever its server
+// starts. Registering is therefore the whole of the install — a line in
+// opencode.json, which `plugin add` writes for us — and everything downstream of
+// ownership comes free.
+//
+// The alternative, copying a directory into plugins/, is a file this plugin
+// placed where OpenCode happens to look. It works, and it is what --copy is for,
+// but it is invisible to `plugin list`, `plugin check` and `plugin update`, so
+// nobody — including OpenCode — can ever update it. That is the difference this
+// function exists to make.
+export function register({ cli = findOpenCodeCli(), name = "opencode-vitals", run = runCli } = {}) {
+  if (!cli) {
+    return {
+      ok: false,
+      reason: "the OpenCode CLI was not found on this machine",
+      command: `opencode plugin add ${name}`,
+    }
+  }
+  const result = run(cli, ["plugin", "add", name])
+  // `plugin add` prints this when the plugin is already registered, and exits 0.
+  return result.ok ? { ok: true, cli, output: result.output } : { ok: false, cli, reason: result.reason }
+}
+
+export function unregister({ cli = findOpenCodeCli(), name = "opencode-vitals", run = runCli, env, home } = {}) {
+  // Read the list before touching it. A user who never installed this should get
+  // no rewrite of their config, and a user who already removed it by hand should
+  // not have a command run for them.
+  const listed = isRegistered({ name, ...(env ? { env } : {}), ...(home ? { home } : {}) })
+  if (!listed.registered) return { ok: true, skipped: true, reason: "not in OpenCode's plugin list" }
+  if (!cli) return { ok: false, reason: "the OpenCode CLI was not found on this machine" }
+  const result = run(cli, ["plugin", "remove", name])
+  return result.ok
+    ? { ok: true, cli, output: result.output, file: listed.file }
+    : { ok: false, cli, reason: result.reason, file: listed.file }
+}
+
 export function readManifest(packageRoot = PACKAGE_ROOT) {
   const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"))
   return manifest
@@ -142,6 +270,37 @@ export function shippedFiles(manifest) {
 export function resolvePluginsDir({ env = process.env, home = homedir() } = {}) {
   const configRoot = env.XDG_CONFIG_HOME || join(home, ".config")
   return join(configRoot, "opencode", "plugins")
+}
+
+// Is this package already in OpenCode's plugin list?
+//
+// This is read rather than asked, on purpose. `plugin add` and `plugin remove`
+// are the supported way to change that file, but they rewrite it — and OpenCode
+// leaves an empty `"plugins": []` behind when it removes the last entry, which is
+// not the same file it was given. Rewriting a user's config to remove something
+// that was never in it is a cost with no benefit, so the list is inspected first
+// and the command only runs when there is something for it to do.
+export function isRegistered({ name = "opencode-vitals", env = process.env, home = homedir() } = {}) {
+  const configRoot = env.XDG_CONFIG_HOME || join(home, ".config")
+  for (const file of ["opencode.json", "opencode.jsonc"]) {
+    let body
+    try {
+      body = readFileSync(join(configRoot, "opencode", file), "utf8")
+    } catch {
+      continue
+    }
+    // A jsonc file is not JSON, and a comment can hide a comma. This looks for
+    // the name as a string among the entries rather than parsing, so a config
+    // with comments in it is read correctly instead of being rejected.
+    const list = body.match(/"plugins"\s*:\s*\[([^\]]*)\]/)?.[1] ?? ""
+    const entries = [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1])
+    // The documented control syntax: a leading `-` disables a plugin, and a later
+    // entry re-enables one. A disable is not a registration to remove.
+    const enabled = entries.filter((entry) => !entry.startsWith("-"))
+    if (enabled.includes(name) || entries.includes(`-${name}`)) return { registered: true, file, entries }
+    return { registered: false, file, entries }
+  }
+  return { registered: false, file: null, entries: [] }
 }
 
 function targetName(manifest) {
@@ -274,12 +433,47 @@ export function install({
   }
 }
 
-export function uninstall({ pluginsDir, packageRoot = PACKAGE_ROOT, name, force = false } = {}) {
+// The kill switch, as a file so that turning it off once turns it off for good.
+// The environment variable does the same job for a single process, and the
+// installer needs a way to clear the file it may have written last time.
+export function setUpdateDisabledMarker(disabled, { dataHome = process.env.XDG_DATA_HOME, home = homedir() } = {}) {
+  const marker = join(dataHome ?? join(home, ".local", "share"), "opencode-vitals", "no-update")
+  try {
+    if (disabled) {
+      mkdirSync(dirname(marker), { recursive: true })
+      writeFileSync(marker, new Date().toISOString())
+    } else {
+      rmSync(marker, { force: true })
+    }
+    return { ok: true, path: marker, disabled: Boolean(disabled) }
+  } catch (error) {
+    return { ok: false, path: marker, reason: String(error) }
+  }
+}
+
+export function uninstall({
+  pluginsDir,
+  packageRoot = PACKAGE_ROOT,
+  name,
+  force = false,
+  // A copy is one shape and a registered package is another; uninstalling has to
+  // deal with whichever is there, and usually both — a machine that was installed
+  // before the switch and reinstalled after it has one of each until the copy is
+  // taken away, because until then the plugin loads twice.
+  unregister: unregisterPlugin = unregister,
+  skipUnregister = false,
+} = {}) {
   const manifest = readManifest(packageRoot)
   const directory = name ?? manifest.name
   const target = join(pluginsDir, directory)
   const existing = describeExisting(target)
-  if (existing.kind === "absent") return { target, action: "nothing-to-do" }
+  const registration = skipUnregister ? { ok: true, skipped: true } : unregisterPlugin({ name: manifest.name })
+  if (existing.kind === "absent") {
+    // Nothing in the plugin directory is not nothing installed: a registered
+    // package lives in node_modules and never appears here.
+    if (registration.ok) return { target, action: "nothing-to-do", registration }
+    return { target, action: "nothing-to-do", registration }
+  }
   // Removing the folder that carries our name is not proof it is ours: compare
   // the manifest, and refuse a stranger unless --force says otherwise.
   const installed = readInstalledManifest(target)
@@ -303,7 +497,10 @@ export function uninstall({ pluginsDir, packageRoot = PACKAGE_ROOT, name, force 
   // but "uninstall" that leaves them is only half an uninstall — and the next
   // install would seed itself from the last one's numbers.
   const status = removeStatus()
-  return { target, action: "removed", wasLink: existing.kind === "link", legacy, readout, status }
+  // And the opt-out, if it was asked for: a marker left behind after the thing it
+  // was disabling is gone is a setting for a plugin that is not installed.
+  const marker = setUpdateDisabledMarker(false)
+  return { target, action: "removed", wasLink: existing.kind === "link", legacy, readout, status, registration, marker }
 }
 
 // Only ever removes this package's files inside the status directory, and only
@@ -332,40 +529,58 @@ export function removeStatus({ statusDir = join(tmpdir(), "opencode-latency-moni
   return { removed, ok: true }
 }
 
-export function status({ pluginsDir, name = "opencode-vitals" } = {}) {
+export function status({ pluginsDir, name = "opencode-vitals", env, home } = {}) {
   const target = join(pluginsDir, name)
   const existing = describeExisting(target)
-  if (existing.kind === "absent") return { target, installed: false, kind: existing.kind }
-  const manifest = readInstalledManifest(target)
+  // Both shapes, because a machine can have either or both, and "installed: no"
+  // would be a lie on one that has the registered package and no copy — which is
+  // the shape every machine is in after the first install.
+  const listed = isRegistered({ name, ...(env ? { env } : {}), ...(home ? { home } : {}) })
+  const copy = existing.kind === "absent" ? null : {
+    target,
+    kind: existing.kind,
+    points: existing.points ?? null,
+    version: readInstalledManifest(target)?.version ?? null,
+  }
+  if (!listed.registered && !copy) return { target, installed: false, kind: existing.kind, registered: false, copy: null }
   return {
     target,
     installed: true,
-    kind: existing.kind,
-    points: existing.points ?? null,
-    version: manifest?.version ?? null,
-    name: manifest?.name ?? null,
+    kind: listed.registered ? "package" : existing.kind,
+    registered: listed.registered,
+    // A copy is worth saying out loud, because it is the shape that can never
+    // update itself, and a person reading this is trying to find out why.
+    copy,
+    version: copy?.version ?? null,
+    updates: listed.registered ? "automatic" : "manual: a copy is not a package OpenCode can update",
   }
 }
 
 const USAGE = `opencode-vitals
 
-  npx opencode-vitals               install into the plugin directory OpenCode reads
+  npx opencode-vitals               install: register this package with OpenCode
   npx opencode-vitals install       the same, said out loud
   npx opencode-vitals status        report what is installed and which version
   npx opencode-vitals uninstall     remove it again
 
-  --link          symlink instead of copying, for working on the source
+  --copy          copy the files into the plugin directory instead of registering
+                  the package. Works without the OpenCode CLI, but OpenCode then
+                  cannot list, check or update the install, so it never updates.
+  --link          symlink into the plugin directory, for working on the source
+  --no-update     never check for, or install, a newer version automatically
   --dir <path>    use this plugin directory instead of the detected one
   --force         replace what is there, even if it is a different package
                   (with uninstall: remove it even when it does not look like ours)
 `
 
 function parseArgs(argv) {
-  const options = { mode: "copy", force: false, dir: null, action: "install" }
+  const options = { mode: "package", force: false, dir: null, action: "install", update: true }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === "--link") options.mode = "link"
+    else if (argument === "--copy") options.mode = "copy"
     else if (argument === "--force") options.force = true
+    else if (argument === "--no-update") options.update = false
     else if (argument === "--uninstall") options.action = "uninstall"
     else if (argument === "--status") options.action = "status"
     else if (argument === "--help" || argument === "-h") options.action = "help"
@@ -392,15 +607,21 @@ function main(argv) {
   if (options.action === "status") {
     const report = status({ pluginsDir })
     if (!report.installed) {
-      process.stdout.write(`not installed in ${pluginsDir}\n`)
+      process.stdout.write(`not installed\n`)
       return 0
     }
-    // "other-package" is an internal kind name; a person reading about their own
-    // install should be told it is a copy.
-    const label = report.kind === "link" ? "link" : "copy"
-    process.stdout.write(
-      `installed in ${report.target}\n  version ${report.version}\n  ${label}${report.points ? ` -> ${report.points}` : ""}\n`,
-    )
+    if (report.registered) {
+      process.stdout.write(
+        `registered with OpenCode in ${join(options.dir ? resolve(options.dir) : resolvePluginsDir(), "..", "opencode.json")}\n` +
+          `  updates ${report.updates}\n`,
+      )
+    }
+    if (report.copy) {
+      process.stdout.write(`also a ${report.copy.kind} at ${report.copy.target}${report.copy.version ? ` (version ${report.copy.version})` : ""}\n`)
+    }
+    if (!report.registered) {
+      process.stdout.write(`installed as a copy at ${report.target}\n  updates ${report.updates}\n`)
+    }
     return 0
   }
 
@@ -412,12 +633,43 @@ function main(argv) {
     return 0
   }
 
-  const report = install({ pluginsDir, mode: options.mode, force: options.force })
+  if (options.mode === "package") {
+    const registered = register()
+    if (!registered.ok) {
+      // Falling back rather than failing: a copy is worse — OpenCode cannot
+      // update it — but it is what this package did until now, and a user who
+      // cannot find the CLI should still end up with a working plugin.
+      process.stdout.write(
+        `could not register the package: ${registered.reason}\n` +
+          `  tried: ${registered.command}\n` +
+          `  installing a copy instead; OpenCode will not be able to update it.\n\n`,
+      )
+    } else {
+      // Both shapes at once means the plugin loads twice and measures every
+      // event twice. This is the one cleanup that has to happen on the way in.
+      const stale = describeExisting(join(pluginsDir, targetName(readManifest())))
+      if (stale.installed && !options.force) {
+        process.stdout.write(`removing the copy at ${stale.target}, which the registered package replaces\n`)
+        uninstall({ pluginsDir, force: true })
+      }
+      process.stdout.write(
+        `registered ${readManifest().name} with OpenCode${registered.cli ? ` (${registered.cli})` : ""}\n` +
+          "OpenCode downloads it in the background and checks it for updates on every start.\n" +
+          "This plugin applies an update it finds and tells you to restart.\n",
+      )
+      if (options.update) setUpdateDisabledMarker(false)
+      process.stdout.write("\nRestart OpenCode. The numbers appear in the composer.\n")
+      return 0
+    }
+  }
+
+  const report = install({ pluginsDir, mode: options.mode === "package" ? "copy" : options.mode, force: options.force })
   const verb = { installed: "installed", updated: "updated", linked: "linked", "already-linked": "already linked" }[report.action]
   process.stdout.write(`${verb} ${report.target}\n  version ${report.version}\n  files ${report.files}\n  plugin directory ${pluginsDir}\n`)
   if (report.missing?.length) {
     process.stdout.write(`  not in this package, skipped: ${report.missing.join(", ")}\n`)
   }
+  if (options.update) setUpdateDisabledMarker(false)
   process.stdout.write("\nRestart OpenCode. The numbers appear in the composer.\n")
   return 0
 }

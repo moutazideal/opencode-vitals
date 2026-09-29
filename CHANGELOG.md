@@ -10,6 +10,15 @@ The window is gone. The numbers are drawn by OpenCode's own UI now.
 
 ### Added
 
+- **The install is now a package OpenCode owns, and it keeps itself current.**
+  Installing runs `opencode plugin add opencode-vitals`, which adds one unpinned line to
+  `opencode.json`; OpenCode fetches the package itself and checks it for a newer release on every
+  start. Because it will not swap code under a running process, this plugin applies the update a few
+  seconds after launch through OpenCode's own updater — the binary already running it — and says so
+  in the log. `npx opencode-vitals status` reports which of the two shapes a machine has, and a copy
+  is now labelled as the shape that can never update itself.
+- `npx opencode-vitals install --no-update` turns the automatic update off for good, by writing a
+  marker; `OPENCODE_VITALS_NO_UPDATE=1` does the same for one process.
 - **The numbers move while a reply is streaming.** They used to be written only
   when a response finished, so the readout sat on the previous reply's figures for
   the whole of the current one — the one moment they are worth watching. The
@@ -94,10 +103,20 @@ The window is gone. The numbers are drawn by OpenCode's own UI now.
   paths it had actually searched were the app bundles, and the installer still
   told the user a window was about to appear.
 - `docs/desktop.png` is used by this page and was not in the shipped file list.
+- **The readout's own launcher entry is written by the plugin, not only by the installer.** The
+  supported way to install this plugin runs none of its code — `opencode plugin add` only edits a
+  config file — so a plugin that set itself up only when its own installer ran would have been a
+  plugin with no readout. Writing the entry is a no-op when it is already correct, so it does not
+  touch the file's timestamp on every launch.
+- Uninstalling and reinstalling left the plugin loading twice: once as the registered package and
+  once as the copy the old installer had made. Installing removes the copy; `status` names both
+  shapes if it finds them.
+- A test run could reach the real OpenCode CLI, because uninstalling now calls it. The config root is
+  redirected to a temporary directory for the whole suite.
 
 ### Measured
 
-- 248 checks, down from 257. Fewer because a window is gone; the ones that remain
+- 339 checks, up from 257 — the renderer and the update path were the two parts with no tests at all. Fewer because a window is gone; the ones that remain
   cover the measurement, the readout, and the failure modes of both.
 
 ## [0.1.7] - 2026-09-28

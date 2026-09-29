@@ -20,6 +20,7 @@
   "files": [
     "index.js",
     "readout.mjs",
+    "update.mjs",
     "renderer/vitals.js",
     "cli.mjs",
     "install.mjs",

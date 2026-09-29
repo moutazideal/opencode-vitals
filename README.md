@@ -87,17 +87,24 @@ mkdir -p ~/.config/opencode/plugins
 cp -r opencode-vitals ~/.config/opencode/plugins/opencode-vitals
 ```
 
+This works, and it is the shape for people who want the plugin to be exactly the code in front of
+them. It is also the shape that can never update itself: a folder in the plugin directory is
+invisible to `opencode plugin list`, `plugin check` and `plugin update`, so from then on you are
+replacing it by hand. `npx opencode-vitals status` will say so.
+
 Working on the source instead? See [For developers](#for-developers).
 
 ### The install command
 
 ```bash
-npx opencode-vitals               # install into the plugin directory
+npx opencode-vitals               # register this package with OpenCode
 npx opencode-vitals install       # the same, said out loud
-npx opencode-vitals selftest      # can this machine draw the bar?
+npx opencode-vitals selftest      # can this machine draw the readout?
 npx opencode-vitals status        # what is installed, and which version
 npx opencode-vitals uninstall     # remove it again
 
+npx opencode-vitals install --no-update   # never update itself
+npx opencode-vitals install --copy        # copy files in, no package registration
 npx opencode-vitals install --dir PATH   # use a plugin directory you choose
 ```
 
@@ -106,21 +113,54 @@ npx opencode-vitals install --dir PATH   # use a plugin directory you choose
 project: `opencode-vitals-install` and `opencode-vitals-selftest` (run them through npm as
 `npm exec --package=opencode-vitals -- opencode-vitals-install`).
 
-Installing twice updates in place and removes files that a newer release no longer ships. It refuses
-to replace a directory that holds a different package unless you pass `--force`, and it will not write
-outside the plugin directory. `--uninstall` refuses to remove a folder that does not carry this
-package's manifest unless you add `--force` too.
+### What installing actually does
 
-The plugin directory is the one OpenCode itself reads — `$XDG_CONFIG_HOME/opencode/plugins`, or
-`~/.config/opencode/plugins` when that variable is unset — **on every platform, Windows included**
-(verified against the shipped CLI, which computes the same path). The path used is printed, so a
-different setup is visible rather than silent.
+It runs `opencode plugin add opencode-vitals`, which adds one line to your `opencode.json`:
 
-**Do not run `npm install opencode-vitals`.** OpenCode resolves and installs npm plugins itself at
-startup — on this machine each package lands in
-`~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. A copy you install into a project's
-`node_modules` is not what gets loaded, so it only leaves a second, stale copy on your disk. The
-config line is the whole install.
+```json
+{ "plugins": ["opencode-vitals"] }
+```
+
+That is the whole install. OpenCode fetches the package itself, in the background, the next time its
+server starts — and because there is no version on that line, it checks for a newer release on every
+start after that.
+
+**Do not run `npm install opencode-vitals`.** OpenCode resolves and installs npm plugins itself; a
+copy in a project's `node_modules` is not what gets loaded, so it only leaves a second, stale copy
+behind.
+
+If you install a copy instead (`--copy`, or a folder you put in `plugins/` yourself), it works, but
+nothing can ever update it: `opencode plugin list` cannot see it and `opencode plugin update` does
+not know it exists. `npx opencode-vitals status` says which shape you have.
+
+### Updates
+
+When OpenCode finds a newer release, it does not apply it — swapping the code under a running process
+is not something a host should do quietly. This plugin does that half. A few seconds after OpenCode
+starts it looks for a newer version, and if there is one it hands the work to OpenCode's own updater
+and prints:
+
+```
+opencode-vitals 0.1.8 → 0.1.9: installed. Restart OpenCode to run it.
+```
+
+So you never run an update command, and you never get a new version silently either: the log says
+what changed and that a restart is what starts it. A restart is not optional and cannot be faked —
+Node has already loaded the current copy into the running process.
+
+To turn it off, permanently, either way:
+
+```bash
+npx opencode-vitals install --no-update      # writes a marker file
+OPENCODE_VITALS_NO_UPDATE=1                   # or just for one process
+```
+
+Nothing here can stop the measurement. Every step is best-effort, a machine that is offline or opted
+out says nothing at all, and a failure is one log line rather than a broken editor.
+
+The launcher entry and the copy of the app's renderer are made by the plugin itself on startup, not
+by the installer — `opencode plugin add` runs none of this package's code, so the first thing to
+execute after a package install is the plugin, and that is where it sets itself up.
 
 ---
 

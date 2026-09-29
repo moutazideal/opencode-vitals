@@ -7,7 +7,7 @@
 // `opencode-vitals` is what makes `npx opencode-vitals install` work.
 //
 //   npx opencode-vitals               install (the same as `install`)
-//   npx opencode-vitals install       copy the plugin into the OpenCode plugin directory
+//   npx opencode-vitals install       register the package with OpenCode
 //   npx opencode-vitals selftest      check this machine before installing
 //   npx opencode-vitals status        report what is installed
 //   npx opencode-vitals uninstall     remove it again
@@ -27,14 +27,18 @@ for (const stream of [process.stdout, process.stderr]) {
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const USAGE = `opencode-vitals
 
-  npx opencode-vitals               install into the plugin directory OpenCode reads
+  npx opencode-vitals               install: register this package with OpenCode
   npx opencode-vitals install       the same, said out loud
   npx opencode-vitals selftest      check this machine before installing
   npx opencode-vitals status        report what is installed and which version
   npx opencode-vitals uninstall     remove it again
 
 Flags:
-  --link          symlink instead of copying, for working on the source
+  --copy          copy the files into the plugin directory instead of registering
+                  the package. Works without the OpenCode CLI, but OpenCode then
+                  cannot list, check or update the install, so it never updates.
+  --link          symlink into the plugin directory, for working on the source
+  --no-update     never check for, or install, a newer version automatically
   --dir <path>    use this plugin directory instead of the detected one
   --force         replace what is there, even if it is a different package
                   (with uninstall: remove it even when it does not look like ours)

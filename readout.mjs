@@ -296,7 +296,19 @@ export function installDesktopEntry() {
   try {
     mkdirSync(DESKTOP_DIR, { recursive: true })
     const target = join(DESKTOP_DIR, systemEntry.name)
-    writeFileSync(target, markedEntryBody(systemEntry, binary))
+    const body = markedEntryBody(systemEntry, binary)
+    // The plugin writes this on every start now, not only when its installer
+    // runs, so it has to be a no-op when there is nothing to change. Rewriting an
+    // identical file would touch its timestamp on every launch, and a timestamp
+    // is exactly what a desktop environment watches.
+    let current = null
+    try {
+      current = readFileSync(target, "utf8")
+    } catch {
+      // Not there, or unreadable: write it, and let the write report a problem.
+    }
+    if (current === body) return { ok: true, path: target, copiedFrom: systemEntry.name, unchanged: true }
+    writeFileSync(target, body)
     return { ok: true, path: target, copiedFrom: systemEntry.name }
   } catch (error) {
     return { ok: false, reason: String(error) }

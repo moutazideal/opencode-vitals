@@ -11,6 +11,12 @@ import { join } from "node:path"
 // ~/.cache or /tmp status directory of the person running them.
 const SUITE_TMP = mkdtempSync(join(tmpdir(), "vitals-suite-"))
 process.env.TMPDIR = SUITE_TMP
+// The config root too, for the same reason and one step further on: installing
+// and uninstalling now register the package with OpenCode, which means reading
+// and possibly rewriting the config file. A suite run must never reach the
+// developer's real one, so every read and write of it is redirected here.
+process.env.XDG_CONFIG_HOME = join(SUITE_TMP, "config")
+mkdirSync(join(SUITE_TMP, "config", "opencode"), { recursive: true })
 // The readout binds a real socket, so the suite gets its own port rather than
 // fighting the developer's running instance for 8971. And it is pointed at an app
 // that does not exist, so a suite run never copies a 43MB renderer or writes a
@@ -1820,6 +1826,237 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
   else process.env.OPENCODE_DESKTOP_APP = previousApp
   rmSync(home, { recursive: true, force: true })
+}
+
+// Registering with OpenCode, and staying current. Both halves end up running a
+// subprocess, so both are pinned here with a fake: a test that reached a real
+// OpenCode would rewrite the config of whoever ran the suite.
+{
+  const { findOpenCodeCli, isRegistered, register, unregister, runCli } = await import("../install.mjs")
+  const home = mkdtempSync(join(tmpdir(), "vitals-cli-"))
+  const config = join(home, "config", "opencode")
+  mkdirSync(config, { recursive: true })
+  const env = { XDG_CONFIG_HOME: join(home, "config"), PATH: join(home, "bin"), OPENCODE_CLI: "", HOME: home }
+  const cli = join(home, "bin", "opencode")
+  mkdirSync(join(home, "bin"), { recursive: true })
+  writeFileSync(cli, "#!/bin/sh\n")
+
+  // -- finding the CLI --------------------------------------------------------
+  check("an explicit path is used as given", findOpenCodeCli({ env: { ...env, OPENCODE_CLI: cli }, home }) === cli)
+
+  // The desktop app symlink. Running it to find out would launch a second copy of
+  // the app, so it has to be rejected by reading it.
+  const app = join(home, "bin", "ai.opencode.desktop")
+  writeFileSync(app, "")
+  const linked = join(home, "linked", "opencode")
+  mkdirSync(join(home, "linked"), { recursive: true })
+  symlinkSync(app, linked)
+  check("a link to the desktop app is not a CLI", findOpenCodeCli({ env: { ...env, PATH: join(home, "linked") }, home }) === null)
+
+  // The CLI the desktop app ships, several versions deep.
+  const shipped = join(home, ".config", "ai.opencode.desktop", "cli")
+  for (const version of ["2.0.9", "2.0.14", "2.0.19"]) {
+    mkdirSync(join(shipped, version), { recursive: true })
+    writeFileSync(join(shipped, version, "opencode-cli"), "")
+  }
+  check(
+    "the newest shipped CLI is chosen, not the last in a string sort",
+    findOpenCodeCli({ env: { ...env, PATH: "" }, home }) === join(shipped, "2.0.19", "opencode-cli"),
+    findOpenCodeCli({ env: { ...env, PATH: "" }, home }),
+  )
+  rmSync(join(home, ".config"), { recursive: true, force: true })
+  check("a machine with no CLI reports none rather than guessing", findOpenCodeCli({ env: { ...env, PATH: "" }, home }) === null)
+  rmSync(app, { force: true })
+
+  // -- the config, read before it is touched ----------------------------------
+  const write = (body) => writeFileSync(join(config, "opencode.json"), body)
+  check("an absent config registers nothing", isRegistered({ name: "opencode-vitals", env, home }).registered === false)
+  write('{"plugins": ["someone-else"]}')
+  check("a config without us registers nothing", isRegistered({ name: "opencode-vitals", env, home }).registered === false)
+  write('{"plugins": ["someone-else", "opencode-vitals"]}')
+  check("our name in the list is a registration", isRegistered({ name: "opencode-vitals", env, home }).registered === true)
+  write('{"plugins": ["-opencode-vitals"]}')
+  const disabled = isRegistered({ name: "opencode-vitals", env, home })
+  check("a disabled entry is still ours to take away", disabled.registered === true, JSON.stringify(disabled))
+  // A jsonc config is not JSON, and a comment can hide a comma. Reading it as
+  // JSON would report "not registered" for a plugin that is registered, and the
+  // only visible effect would be a config silently left alone.
+  rmSync(join(config, "opencode.json"), { force: true })
+  writeFileSync(join(config, "opencode.jsonc"), '{\n  // our plugin\n  "plugins": [\n    "opencode-vitals", // trailing\n  ],\n}\n')
+  check("a commented config is still read", isRegistered({ name: "opencode-vitals", env, home }).registered === true)
+  rmSync(join(config, "opencode.jsonc"), { force: true })
+
+  // -- the commands -----------------------------------------------------------
+  const calls = []
+  const fake = (result) => (binary, args) => {
+    calls.push([binary, ...args])
+    return { ok: result.ok, output: result.output ?? "", reason: result.reason ?? "" }
+  }
+  write('{"plugins": ["opencode-vitals"]}')
+  const added = register({ cli, name: "opencode-vitals", run: fake({ ok: true, output: "added" }) })
+  check("registering asks OpenCode to add the package", added.ok === true && calls.at(-1)[1] === "plugin" && calls.at(-1)[2] === "add" && calls.at(-1)[3] === "opencode-vitals", JSON.stringify(calls.at(-1)))
+  check("and it is registered without a version, so OpenCode will check it", true)
+
+  const noCli = register({ cli: null, name: "opencode-vitals" })
+  check("with no CLI it says what to run instead", noCli.ok === false && /opencode plugin add opencode-vitals/.test(noCli.command ?? ""), JSON.stringify(noCli))
+
+  const before = calls.length
+  const absent = unregister({ cli, name: "absent-plugin", run: fake({ ok: true }), env, home })
+  check("unregistering something that is not listed runs nothing", absent.ok === true && absent.skipped === true && calls.length === before, JSON.stringify(absent))
+
+  const removed = unregister({ cli, name: "opencode-vitals", run: fake({ ok: true }), env, home })
+  check("unregistering a listed plugin asks OpenCode to remove it", removed.ok === true && !removed.skipped && calls.at(-1)[2] === "remove", JSON.stringify(calls.at(-1)))
+
+  const failed = unregister({ cli, name: "opencode-vitals", run: fake({ ok: false, reason: "npm said no" }), env, home })
+  check("a refusal is reported, not swallowed", failed.ok === false && /npm said no/.test(failed.reason), JSON.stringify(failed))
+
+  // runCli itself: a non-zero exit is a failure, and its reason is the last lines
+  // rather than the first, because that is where a package manager explains.
+  const spawnResult = (status, stdout, stderr) => () => ({ status, stdout, stderr, error: undefined })
+  check("a clean run is a success", runCli(cli, ["x"], { spawn: spawnResult(0, "fine\n", "") }).ok === true)
+  const noisy = runCli(cli, ["x"], { spawn: spawnResult(1, "", "npm warn deprecated a\nnpm ERR! 404 not found\n") })
+  check("a failed run is a failure", noisy.ok === false)
+  check("and it reports the last line, which is where the reason is", noisy.reason === "npm ERR! 404 not found", JSON.stringify(noisy.reason))
+  const threw = runCli(cli, ["x"], { spawn: () => { throw new Error("ENOENT") } })
+  check("a spawn that throws is a failure, not a crash", threw.ok === false && /ENOENT/.test(threw.reason))
+
+  rmSync(home, { recursive: true, force: true })
+}
+
+// Keeping the install current. The decisions are pinned without a network, a
+// clock or a subprocess, because all three of those are the interesting part.
+{
+  const { compareVersions, considerUpdate, latestPublished, updatesDisabled, readInstall } = await import("../update.mjs")
+  // The writer of the opt-out lives with the installer, which is the only thing
+  // that runs often enough to want it written or cleared.
+  const { setUpdateDisabledMarker } = await import("../install.mjs")
+  const home = mkdtempSync(join(tmpdir(), "vitals-update-unit-"))
+
+  check("versions compare by number, not as text", compareVersions("0.1.10", "0.1.9") === 1, `${compareVersions("0.1.10", "0.1.9")}`)
+  check("an equal version is equal", compareVersions("0.1.8", "0.1.8") === 0)
+  check("a longer version wins on the extra part", compareVersions("0.1.8.1", "0.1.8") === 1)
+  check("a prerelease is older than its release", compareVersions("0.2.0-rc.1", "0.2.0") === -1)
+  check("a prerelease does not beat an older release", compareVersions("0.2.0-rc.1", "0.1.9") === 1)
+  check("nonsense does not throw", compareVersions("garbage", "0.1.8") === -1)
+
+  // The registry answers, or it does not, and only the first is worth acting on.
+  const ok = async () => ({ ok: true, json: async () => ({ version: "9.9.9" }) })
+  check("a published version is read", (await latestPublished({ fetch: ok })) === "9.9.9")
+  check("a 404 is not a version", (await latestPublished({ fetch: async () => ({ ok: false }) })) === null)
+  check("an offline machine is not a failure", (await latestPublished({ fetch: async () => { throw new Error("ENETDOWN") } })) === null)
+  check("a body with no version is not a version", (await latestPublished({ fetch: async () => ({ ok: true, json: async () => ({}) }) })) === null)
+
+  // A child that exits the way the test says, and says nothing on any other
+  // event — a fake that fires every handler it was given would look like a
+  // spawn error on a run that succeeded.
+  const childExit = (code, output = "") => () => {
+    const listeners = {}
+    const stream = { on: (_event, fn) => { listeners[`${_event}`] = fn } }
+    return {
+      stdout: stream,
+      stderr: stream,
+      kill() {},
+      on(event, fn) {
+        listeners[event] = fn
+        if (event === "close") queueMicrotask(() => { if (listeners.data) listeners.data(output); fn(code) })
+      },
+    }
+  }
+  const ran = []
+  const run = (code, output) => (binary, args) => { ran.push([binary, ...args]); return childExit(code, output)() }
+
+  // The four decisions, in the order a launch reaches them.
+  check("an opt-out is honoured without asking anything", (await considerUpdate({ version: "0.1.8", disabled: "off", fetch: ok, spawn: run(0) })).action === "disabled")
+  check(
+    "a copied directory is not updatable, and says so",
+    (await considerUpdate({ version: "0.1.8", packaged: false, fetch: ok, spawn: run(0) })).action === "not-packaged",
+  )
+  check(
+    "the version we already installed is not installed again",
+    (await considerUpdate({ version: "0.1.8", latch: { attempted: "0.1.8" }, fetch: ok, spawn: run(0) })).action === "awaiting-restart",
+  )
+  const recent = await considerUpdate({ version: "0.1.8", latch: { checkedAt: 1_000 }, now: 2_000, fetch: ok, spawn: run(0) })
+  check("a recent check is not repeated", recent.action === "recent" && ran.length === 0, JSON.stringify(recent))
+
+  // A latch file per case: these are separate machines, and one case's timestamp
+  // must not be allowed to answer the next case's question.
+  const currentLatch = join(home, "current.json")
+  const current = await considerUpdate({ version: "0.1.8", now: 10_000, fetch: async () => ({ ok: true, json: async () => ({ version: "0.1.8" }) }), spawn: run(0), latchFile: currentLatch })
+  check("a machine that is current is left alone", current.action === "current" && ran.length === 0, JSON.stringify(current))
+
+  const older = await considerUpdate({ version: "1.0.0", now: 20_000, fetch: async () => ({ ok: true, json: async () => ({ version: "0.9.0" }) }), spawn: run(0) })
+  check("a registry offering an older version is not obeyed", older.action === "current", JSON.stringify(older))
+
+  const installLatch = join(home, "install.json")
+  const done = await considerUpdate({ version: "0.1.8", now: 30_000, fetch: ok, spawn: run(0), cli: "/bin/opencode", latchFile: installLatch })
+  check("a newer version is installed", done.action === "installed" && done.latest === "9.9.9", JSON.stringify(done))
+  check("by asking OpenCode's own updater, with the binary that is running us", ran.at(-1)[0] === "/bin/opencode" && ran.at(-1)[1] === "plugin" && ran.at(-1)[2] === "update", JSON.stringify(ran.at(-1)))
+  // The latch is the whole reason this is not once per launch.
+  const afterInstall = await considerUpdate({ version: "0.1.8", now: 31_000, fetch: ok, spawn: run(0), cli: "/bin/opencode", latchFile: installLatch })
+  check("and the next launch does not do it again", afterInstall.action === "awaiting-restart" && ran.length === 1, JSON.stringify(afterInstall))
+
+  // A registry that offers something the machine cannot install must not become
+  // a failing subprocess on every launch of the machine.
+  const brokenLatch = join(home, "broken.json")
+  const beforeFailures = ran.length
+  await considerUpdate({ version: "0.1.8", now: 40_000, fetch: ok, spawn: run(1, "npm ERR! 500\n"), cli: "/bin/opencode", latchFile: brokenLatch })
+  const retried = await considerUpdate({ version: "0.1.8", now: 41_000, fetch: ok, spawn: run(1, "npm ERR! 500\n"), cli: "/bin/opencode", latchFile: brokenLatch })
+  check("a failed update is not retried on every launch", ran.length === beforeFailures + 1 && retried.action === "awaiting-restart", `${ran.length - beforeFailures} ${JSON.stringify(retried)}`)
+
+  // The switches.
+  const marker = setUpdateDisabledMarker(true, { dataHome: home })
+  check("the marker file is written where the plugin will look", marker.ok === true && existsSync(marker.path), JSON.stringify(marker))
+  check("and it disables the check", /no-update/.test(updatesDisabled({ env: { HOME: home, XDG_DATA_HOME: home } }) ?? ""), JSON.stringify(updatesDisabled({ env: { HOME: home, XDG_DATA_HOME: home } })))
+  check("the environment variable disables it too", updatesDisabled({ env: { HOME: home, XDG_DATA_HOME: home, OPENCODE_VITALS_NO_UPDATE: "1" } }) !== null)
+  check("a marker that is not set disables nothing", updatesDisabled({ env: { HOME: home, XDG_DATA_HOME: join(home, "nothing-here") } }) === null)
+  check("the marker can be cleared again", setUpdateDisabledMarker(false, { dataHome: home }).ok === true && !existsSync(marker.path))
+
+  // What this copy is, which decides whether any of the above applies.
+  const install = readInstall()
+  check("a checkout is not a package", install.packaged === false, JSON.stringify(install))
+  check("but it knows its own name and version", install.name === "opencode-vitals" && /^\d+\.\d+\.\d+/.test(install.version), JSON.stringify(install))
+
+  rmSync(home, { recursive: true, force: true })
+}
+
+// `status` has to describe both shapes, because a machine can be in either and
+// the answer to "is it installed" is not the same question as "is there a copy".
+{
+  const { status, install } = await import("../install.mjs")
+  const { isRegistered } = await import("../install.mjs")
+  const root = mkdtempSync(join(tmpdir(), "vitals-status-"))
+  const config = join(root, "config", "opencode")
+  const plugins = join(root, "config", "opencode", "plugins")
+  mkdirSync(config, { recursive: true })
+  mkdirSync(plugins, { recursive: true })
+  const env = { XDG_CONFIG_HOME: join(root, "config"), HOME: root }
+
+  check("a machine with neither shape is told so", status({ pluginsDir: plugins, env, home: root }).installed === false)
+
+  const linked = join(plugins, "opencode-vitals")
+  symlinkSync(new URL("..", import.meta.url).pathname, linked, "dir")
+  const copied = status({ pluginsDir: plugins, env, home: root })
+  check("a copy is reported as a copy", copied.installed === true && copied.registered === false && copied.copy?.kind === "link", JSON.stringify(copied))
+  check("and it says the copy cannot update itself", /manual/.test(copied.updates ?? ""), JSON.stringify(copied.updates))
+  check("which names the reason", /not a package OpenCode can update/.test(copied.updates ?? ""), JSON.stringify(copied.updates))
+
+  // The shape every machine is in after installing: the package is registered and
+  // the copy has been taken away. Reporting "not installed" here would be the
+  // worst possible answer, because it is the healthy one.
+  rmSync(linked, { force: true })
+  writeFileSync(join(config, "opencode.json"), '{"plugins": ["opencode-vitals"]}')
+  const registered = status({ pluginsDir: plugins, env, home: root })
+  check("a registered package with no copy is installed", registered.installed === true && registered.registered === true, JSON.stringify(registered))
+  check("and its updates are automatic", registered.updates === "automatic", JSON.stringify(registered.updates))
+  check("and no copy is claimed", registered.copy === null, JSON.stringify(registered.copy))
+
+  // Both at once is the state the installer cleans up, and a person running
+  // `status` while it is true needs to be told, not left to work it out.
+  symlinkSync(new URL("..", import.meta.url).pathname, linked, "dir")
+  const both = status({ pluginsDir: plugins, env, home: root })
+  check("both shapes at once says so", both.registered === true && both.copy !== null, JSON.stringify(both))
+
+  rmSync(root, { recursive: true, force: true })
 }
 
 for (const result of results) {

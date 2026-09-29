@@ -119,8 +119,8 @@ const FALLBACK_FILES = [
   "install.mjs",
   "README.md",
   "LICENSE",
-  "docs/bar.png",
-  "docs/bar-mini.png",
+  "docs/readout.png",
+  "docs/readout-close.png",
   "docs/desktop.png",
 ]
 

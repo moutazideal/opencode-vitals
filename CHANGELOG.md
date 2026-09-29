@@ -4,6 +4,78 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-09-29
+
+The number that moves is gone, and the page that describes this plugin is true
+again.
+
+### Removed
+
+- **The figure for the reply in flight.** The readout showed a live rate beside
+  the session's settled one, and it was wrong by construction rather than by
+  accident. Tokens only arrive when a model step ends, so a rate had to be
+  counted in **characters** while the number beside it was counted in **tokens** —
+  and a token is about four characters, so `1600` next to `143` was off by a
+  factor of four every single time, with no unit on the provisional one to say
+  which was which. On a real session it read as a model running at a third of the
+  speed the same session was reporting, which is the one thing this plugin
+  exists not to do.
+
+  Its numerator was also missing a term its own denominator included: the time
+  the model spends writing a tool call's arguments is streaming time, so it is in
+  the denominator, and the characters of those arguments were not in the
+  numerator. So the figure dipped every time the model called a tool, for a reason
+  that had nothing to do with speed — and it disagreed with this codebase's own
+  character-based measure, which does include them.
+
+  A labelled version would have fixed the unit and left a row carrying two
+  different quantities. A token rate could not be produced mid-flight at all
+  without estimating, and this project does not estimate. So it is gone rather
+  than renamed: a reply in progress has no settled rate to report, and now says
+  nothing.
+
+### Fixed
+
+- **Installing reported a version it could not know.** The updater's exit code
+  was read as proof of what was installed, which on this machine disagreed with
+  the result every time: the command fetches the release correctly and then exits
+  non-zero with a stack trace out of its own bundle. Installing asks OpenCode
+  which version it ended up with and reports that, which is a fact. A machine
+  left on an older release — the failure that second command exists to prevent —
+  exits clean and says nothing, so only asking catches it.
+- **The documented command failed in a checkout.** `npx opencode-vitals uninstall`
+  without a version makes `npx` run whatever the current directory already has,
+  which is `node_modules/.bin/opencode-vitals` — stale or absent in a clone — and
+  fails with `sh: 1: opencode-vitals: not found`. So the command in the README
+  failed for the person most likely to be reading it, standing in the repository.
+  Every example now carries `@latest`, and the reason is written beside it,
+  because the fix is invisible and the next person to tidy it away solves nothing.
+
+### Documentation
+
+- **"This plugin has no network code at all. No registry calls, no update pings."
+  That stopped being true in 0.1.9.** A privacy claim one release behind the code
+  is worse than no claim, because it is believed. The page now names the one host
+  the plugin contacts, says what is sent — a package name — and how often, says
+  how to turn it off, and says what it writes outside your home: the launcher
+  entry, and when that entry exists. There are checks so these cannot go stale
+  quietly again.
+- The window on top of the app is gone from the page: the tagline, the install
+  steps, the `popup` option, the selftest sample and the updating section all
+  described a bar. The updating section is now about the update that happens on
+  its own, and includes what to do if OpenCode will not start — which is a thing
+  that can happen while this plugin is installed, and is one `rm` away from
+  being undone.
+- The screenshots are named for what they show. `docs/bar.png` was a picture of
+  a composer.
+
+### Measured
+
+- 380 checks, up from 373. The removed feature took its checks with it, and what
+  replaced them is the property that matters: a response carries the session and
+  its totals and nothing else, and a payload that still arrives with a
+  provisional figure is drawn without it.
+
 ## [0.1.10] - 2026-09-29
 
 Uninstalling a registered install actually uninstalls it.

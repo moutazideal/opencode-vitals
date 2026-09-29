@@ -34,11 +34,6 @@ const GIVE_UP_AFTER = 10
 // are, where bare numbers do not.
 const UNITS = { turns: "turns", steps: "steps", rate: "tok/s", last: "last10" }
 
-// The reply in flight, which is the one worth watching: the completed session
-// sits still while this moves. It is dimmed and marked, because its rate is
-// provisional and it is not part of the session's own numbers yet.
-const LIVE_ID = "opencode-vitals-live"
-
 const format = (value) => {
   if (value === null || value === undefined || !Number.isFinite(value)) return null
   if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
@@ -69,7 +64,6 @@ const currentSession = () => {
 // Build the element once and then only change its text, so the readout does not
 // fight the app's own layout on every tick.
 let root = null
-let live = null
 const parts = {}
 // Polls in a row that have found no server, and whether there is anything to show
 // at all. See GIVE_UP_AFTER.
@@ -105,26 +99,6 @@ const build = () => {
     parts[key] = { value, unit }
   }
 
-  live = document.createElement("span")
-  live.id = LIVE_ID
-  live.style.cssText = [
-    "display:none",
-    "align-items:center",
-    "gap:5px",
-    "padding-inline-start:8px",
-    "margin-inline-start:2px",
-    "border-inline-start:1px solid var(--border, #2a3040)",
-    "opacity:.85",
-  ].join(";")
-  const liveValue = document.createElement("span")
-  liveValue.style.cssText = "color:var(--text-base, #a0a0a0);font-variant-numeric:tabular-nums"
-  const liveUnit = document.createElement("span")
-  liveUnit.textContent = "now"
-  liveUnit.style.cssText = "opacity:.62"
-  live.append(liveValue, liveUnit)
-  root.append(live)
-  parts.live = { value: liveValue, unit: liveUnit }
-
   return root
 }
 
@@ -151,21 +125,6 @@ const place = () => {
   // Ahead of the send button, on the right of the row.
   host.insertBefore(root, host.firstChild)
   return true
-}
-
-// The reply in flight, when there is one. It is the number that moves while the
-// session average sits still, which is why it is there at all.
-const paintLive = (record) => {
-  if (!live) return
-  const rate = record && Number.isFinite(record.charactersPerSecond) ? format(record.charactersPerSecond) : null
-  if (rate === null) {
-    live.style.display = "none"
-    return
-  }
-  live.style.display = ""
-  parts.live.value.textContent = rate
-  const steps = Number.isFinite(record.stepCount) ? record.stepCount : 0
-  parts.live.unit.textContent = steps > 0 ? `now · ${steps} step${steps === 1 ? "" : "s"}` : "now"
 }
 
 const paint = (payload) => {
@@ -242,10 +201,7 @@ const tick = async () => {
   const slots = document.querySelectorAll("[data-slot]").length
   const where = placed ? "composer-actions" : `composer-actions absent; slots=${slots}`
   report(placed, `${where}; session=${sessionID ?? "none"}${payload ? "" : "; no data yet"}`)
-  if (payload && placed) {
-    paint(payload)
-    paintLive(payload.live ?? null)
-  }
+  if (payload && placed) paint(payload)
 }
 
 // The app re-renders the composer as sessions change, which removes our node.

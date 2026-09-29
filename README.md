@@ -1,14 +1,14 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar.png" width="900" alt="The OpenCode Vitals readout inside OpenCode's own composer: a dark prompt box with the placeholder Ask anything, / for commands, @ for context… and, on the row below it beside the agent, model and send controls, the readings 1 turns, 1 steps, 200 tok/s and 200 last10">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/readout.png" width="900" alt="The OpenCode Vitals readout inside OpenCode's own composer: a dark prompt box with the placeholder Ask anything, / for commands, @ for context… and, on the row below it beside the agent, model and send controls, the readings 1 turns, 1 steps, 200 tok/s and 200 last10">
   <h1>OpenCode Vitals</h1>
   <p><strong>Stop guessing how fast your model is. Watch it.</strong></p>
-  <p>A tiny always-on-top bar for OpenCode V2 that shows one honest line for the session you are
-  working in: turns, steps, the average streaming tokens per second, and the average of the last ten
+  <p>One honest line for the session you are working in, drawn inside OpenCode's own composer:
+  turns, steps, the average streaming tokens per second, and the average of the last ten
   responses beside it.</p>
   <p>
     <img alt="platform: Linux verified, macOS and Windows expected" src="https://img.shields.io/badge/platform-Linux%20verified%20%7C%20macOS%20%2B%20Windows%20expected-2ea44f">
     <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-2ea44f">
-    <img alt="network calls: none" src="https://img.shields.io/badge/network%20calls-none-2ea44f">
+    <img alt="network: the npm registry, for update checks only, opt out with --no-update" src="https://img.shields.io/badge/network-npm%20registry%2C%20updates%20only-2ea44f">
     <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-8b5cf6">
   </p>
   <p>
@@ -27,10 +27,11 @@
 
 ## Install
 
-Three ways. The first needs nothing on your machine but Node — no clone, no editing a config file —
+Three steps. The first needs nothing on your machine but Node — no clone, no editing a config file —
 so it is the one to start with.
 
-**1 — Check your machine first.** It takes ten seconds and tells you whether the bar can run here:
+**1 — Check your machine first.** It takes a second, writes nothing, and tells you whether this
+machine can show the readout at all:
 
 ```bash
 npx opencode-vitals@latest selftest
@@ -42,11 +43,19 @@ npx opencode-vitals@latest selftest
 npx opencode-vitals@latest install
 ```
 
-That copies the plugin into the folder OpenCode already looks in, and prints the path it used. It
-never touches your configuration file, and it makes no network calls: the package it installs is the
-one `npx` just downloaded.
+That runs `opencode plugin add opencode-vitals`, which adds one line to your `opencode.json`:
 
-**3 — Restart OpenCode.** The bar is on screen within seconds.
+```json
+{ "plugins": ["opencode-vitals"] }
+```
+
+That line is the whole install. OpenCode fetches the package itself, in the background, the next time
+its server starts — and because there is no version on it, it checks for a newer release on every
+start after that. The install also asks OpenCode to fetch the current release, and prints the version
+it ended up with, so "installed" and "installed the right one" are two separate claims and you can see
+which happened.
+
+**3 — Restart OpenCode.** The numbers appear in the composer the next time you open it.
 
 ### Let OpenCode keep the plugin up to date
 
@@ -60,7 +69,7 @@ package and updates it itself at startup, and the install command above is never
 }
 ```
 
-To pass options — a different history size, or the bar off — use the object form:
+To pass options — a different history size, or the readout off — use the object form:
 
 ```jsonc
 {
@@ -206,7 +215,7 @@ Every feature, in one place:
 | **You can check what is running** | `npx opencode-vitals@latest selftest` checks whether this machine can show the readout: the app is installed, its renderer can be copied, the copy is current, and the readout is wired into it. |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar-mini.png" width="640" alt="The readout close up: 1 turns, 1 steps, 200 tok/s and 200 last10, in the app's own muted and bright text colours">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/readout-close.png" width="640" alt="The readout close up: 1 turns, 1 steps, 200 tok/s and 200 last10, in the app's own muted and bright text colours">
 </p>
 
 ## The numbers, exactly
@@ -301,24 +310,29 @@ node selftest.mjs               # from a clone
 ```
 
 ```
-opencode-vitals 0.1.8
+opencode-vitals 0.1.11
 
 ok   the desktop app is installed  /opt/OpenCode/resources/app.asar
 ok   the app has a launcher entry  ai.opencode.desktop.desktop → /opt/OpenCode/ai.opencode.desktop %U
 ok   the launcher binary is where the entry says  /opt/OpenCode/ai.opencode.desktop
-ok   the app's renderer can be copied  fae2fe5ccfc6602c63fe25ddabae6351 (already current)
-ok   the readout renderer is in place  /home/you/.local/share/opencode-vitals/renderer
-ok   the readout is wired into the copied page
-ok   the page's assets came with it
+ok   the app's renderer can be found  fae2fe5ccfc6602c63fe25ddabae6351
+ok   the readout can be injected beside the app's bundle  the page loads a module bundle
+    a copy of the renderer is in place, and it matches this build
+    the readout is served by the plugin, not by this command
+    this check does not start OpenCode and does not open a window
+    open the app and the numbers appear in the composer's action row
 
 this machine can show the readout
 ```
+
+It writes nothing. It used to prove it could copy the app's renderer by copying it, which left 43MB
+on a machine that was only being asked a question.
 
 ## Options
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `popup` | `true` | Show the bar. `false` keeps measuring with no window. |
+| `popup` | `true` | Show the readout. `false` keeps measuring and serves nothing to the app. |
 | `historyLimit` | `20` | Measurements kept in storage, 1–100. |
 | `log` | `false` | Log one line per measurement through OpenCode's logger. Errors and version changes are printed either way. |
 | `enabled` | `true` | Master switch. |
@@ -342,15 +356,32 @@ Environment variables, for the curious:
 | `OPENCODE_VITALS_DIR` | `~/.local/share/opencode-vitals` | Where the copy of the app's renderer is kept. |
 | `OPENCODE_DESKTOP_APP` | detected | Point this at a specific `app.asar` when the app is somewhere unusual. An explicit value is the whole answer, not the first of several guesses. |
 
-The status files (`OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_CURRENT_FILE`,
-`OPENCODE_LATENCY_TOTALS_FILE`, `OPENCODE_LATENCY_VERSION_FILE`) exist so the measurement can be run
-against an isolated directory — the test suite uses them — and rarely need to be set by hand.
+The status files (`OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_TOTALS_FILE`,
+`OPENCODE_LATENCY_VERSION_FILE`) exist so the measurement can be run against an isolated directory —
+the test suite uses them — and rarely need to be set by hand.
 
 ## Privacy
 
-This plugin has no network code at all. No registry calls, no analytics, no telemetry, no update
-pings. It reads OpenCode's own event stream and writes a handful of small JSON files under your
-system temporary directory.
+There is no analytics and no telemetry, and nothing you type is ever sent anywhere. It reads
+OpenCode's own event stream and writes a handful of small JSON files under your system temporary
+directory.
+
+**It does make one network call, and it is new.** Since 0.1.9 the plugin checks whether a newer
+version of itself has been published, and if there is one it applies it — so that a plugin which draws
+numbers inside your editor does not quietly rot for months. That means one HTTPS GET to
+`registry.npmjs.org` a few seconds after OpenCode starts, at most once every six hours, and it is the
+only host it ever contacts. Nothing about you is in the request: it asks for a package name and gets a
+version number back.
+
+You can turn it off for good:
+
+```bash
+npx opencode-vitals@latest install --no-update   # writes a marker file
+OPENCODE_VITALS_NO_UPDATE=1                       # or just for one process
+```
+
+With it off the plugin makes no network calls at all, which is what this section said before the
+updater existed.
 
 - **Prompts and responses are never stored.** Only counts, timings, model and agent names, and
   session/message identifiers. The last-ten reading is a list of numbers and nothing else.
@@ -359,60 +390,95 @@ system temporary directory.
   at any point.
 - **One file outside your home directory is read:** the app's own `app.asar`, to copy its renderer
   out so the readout can be wired in. It is opened read-only and never written to.
+- **One launcher entry is written,** a copy of the desktop entry with `Exec` changed to start the app
+  pointed at the local server. It is only ever written while that server has something to serve, and
+  removed when it does not, so a plugin that cannot serve cannot leave the app unable to start.
+  Uninstalling removes it.
 - **Nothing survives a restart except the numbers.** The status directory is plain files in
   `/tmp`-style temporary storage, and stale response markers are swept on a timer rather than
   waiting for your next message.
 
 ## Updating
 
-How you update depends on how you installed it.
+**Normally you do not.** OpenCode checks unpinned packages for updates when its server starts, and
+this plugin does the half OpenCode deliberately leaves alone: a few seconds after launch it looks for
+a newer release and, if there is one, hands the work to OpenCode's own updater and says:
+
+```
+opencode-vitals 0.1.10 → 0.1.11: installed. Restart OpenCode to run it.
+```
+
+So you never run an update command, and you never get new code silently either: the log says what
+changed and that a restart is what starts it. The restart is not optional and cannot be faked — Node
+has already loaded the current copy into the running process, so a new version on disk is not a new
+version running.
 
 | How you installed it | How to update |
 | --- | --- |
-| `npx opencode-vitals@latest install` | Run the same command again. It updates in place. |
+| `npx opencode-vitals@latest install` | Nothing. It is registered unpinned, so it updates itself. |
+| `"plugins": ["opencode-vitals"]` by hand | Nothing, and the same. This is what the install command writes. |
+| `npx opencode-vitals@latest install --no-update` | `npx opencode-vitals@latest install` again, without the flag. |
 | `npx opencode-vitals@latest install --link` | `git pull` in the checkout; the link picks it up. |
-| `"plugins": ["opencode-vitals"]` | OpenCode owns the copy: it resolves the package at startup into `~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. Quit and reopen OpenCode after a new version is published, then check the version below. |
-| Copied the folder | Replace the files with the new release. The running plugin picks them up within about five seconds. |
+| `npx opencode-vitals@latest install --copy` | By hand, by replacing the files. A copy is invisible to `opencode plugin update`, which is why it cannot update itself. |
+
+To turn the automatic update off permanently, or back on:
 
 ```bash
-npm view opencode-vitals version                              # what is published now
-ls -d ~/.cache/opencode/npm/opencode-vitals@latest/* 2>/dev/null  # what OpenCode holds
+npx opencode-vitals@latest install --no-update
+npx opencode-vitals@latest install
+OPENCODE_VITALS_NO_UPDATE=1        # just for one process
 ```
-
-OpenCode has its own `update` setting — `"update": "notify" | "auto" | "disable"`, defaulting to
-`notify` — and its documentation states that an automatic install does **not** restart a running
-server, so something has to restart for a new copy to take effect. Whether that setting also covers
-plugins is not something this project has verified.
 
 ### Check what is actually running
 
-Do not assume an update landed. The selftest prints the loaded version, and the bar says so out loud:
+Do not assume an update landed. Two things answer it:
 
 ```bash
-npx opencode-vitals@latest selftest
+npx opencode-vitals@latest status              # what is registered, and whether updates are automatic
+opencode plugin list                           # which version OpenCode holds
 ```
 
+`status` says which of the two shapes you have:
+
 ```
-ok   plugin version recorded — running 0.1.5, package 0.1.5
+registered with OpenCode in ~/.config/opencode/opencode.json
+  updates automatic
 ```
 
-If it still reports the old version, OpenCode reused its cached snapshot. That is the normal case
-after a plain restart: each package keeps a single `<timestamp>` directory in the cache, and on this
-machine several application restarts produced no second snapshot, so a restart alone is not proof of
-a refresh. Quit OpenCode, and if the version still has not moved, stop the leftover sidecar process
-— the `opencode-cli serve --service` process — and launch OpenCode again, then run the selftest once
-more. On Linux that service is supervised by systemd and can outlive the app window, which is why
-reopening the window is not always enough.
+or, for a copy:
 
-### How the plugin announces a new copy
+```
+installed as a copy at ~/.config/opencode/plugins/opencode-vitals
+  updates manual: a copy is not a package OpenCode can update
+```
 
-When the module is evaluated it compares its own `package.json` version with the one it recorded in
-`plugin-version.json`, with no network call involved:
+### Why the install command fetches as well as registers
 
-- the bar shows `0.2.0 installed` for eight seconds, exactly once — even if the update landed while
-  OpenCode was closed;
-- the plugin log reads `updated 0.1.5 -> 0.2.0`;
-- the selftest prints `running <new>, package <new>` and the previous version when there was one.
+`opencode plugin add` writes the config line and stops there. On its own that is not enough, and the
+reason is in OpenCode's documentation: it checks unpinned packages for updates on startup and
+deliberately **does not swap the installed one** — the cached copy loads immediately and the check
+happens in the background. So a machine that resolved this package while an older version was the
+latest keeps that version indefinitely.
+
+That state is unrecoverable from inside, which is the part that matters: the code that would fix it is
+the code that is not running. A version from before the update check cannot check, so it stays where
+it is, and there is no symptom to report. Installing therefore runs `opencode plugin update` after
+`plugin add`, and prints the version it ended up with — because a command that exits non-zero while
+having succeeded is not a thing to read a version off, and this one does exactly that.
+
+### If OpenCode will not start
+
+The launcher entry points the app at the local server, so if that server has nothing to serve the
+window comes up empty. Three things prevent it, and one command undoes it if it happens anyway:
+
+```bash
+rm -f ~/.local/share/applications/ai.opencode.desktop.desktop
+```
+
+That is the whole recovery: OpenCode starts itself, without the readout, and the plugin puts the entry
+back the next time it can serve something. The server rebuilds the copy it needs on the first request
+that misses, and the entry is only written while there is a copy, so the failure is meant to be
+temporary by construction rather than by luck.
 
 ## For developers
 

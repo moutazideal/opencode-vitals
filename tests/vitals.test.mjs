@@ -615,10 +615,32 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // update the other two install methods, is the gap that got reported.
   const updating = readme.slice(readme.indexOf("## Updating"))
   check("updating covers the git install", /git pull/.test(updating))
-  check("updating covers the copied install", /Replace the files/.test(updating))
-  check("updating tells users how to verify", /opencode-vitals@latest selftest/.test(updating) && /plugin version recorded — running \d+\.\d+\.\d+/.test(updating))
-  check("updating links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
-  // The README is also the npm package page, where a relative docs/bar.png
+  // The one fact a reader most needs, and the one most likely to be dropped by a
+  // later edit: there is no update command to remember.
+  check("updating says it updates itself", /updates itself/.test(updating) && /Restart OpenCode to run it/.test(updating))
+  // A copy is the shape that cannot, and has to be said so where the copy is
+  // described — otherwise the table reads as "everything updates".
+  check("updating covers the copied install and says it cannot", /--copy/.test(updating) && /cannot update itself/.test(updating))
+  check("updating says how to turn the automatic update off", /--no-update/.test(updating) && /OPENCODE_VITALS_NO_UPDATE/.test(updating))
+  check("updating tells users how to verify", /status/.test(updating) && /opencode plugin list/.test(updating))
+  // The failure that matters most has a recovery written down, because the entry
+  // it leaves behind can stop the app opening.
+  check("updating says what to do if OpenCode will not start", /will not start/.test(updating) && /rm -f .*ai\.opencode\.desktop\.desktop/.test(updating))
+  check("updating links both screenshots", readme.includes("docs/readout.png") && readme.includes("docs/readout-close.png"))
+  // The updater made "no network code at all" false, and that sentence was on the
+  // npm page describing what the plugin does with your machine. A privacy claim
+  // that is one release behind the code is worse than no claim, because it is
+  // believed. These are the ways it can start being wrong again.
+  const privacy = readme.slice(readme.indexOf("## Privacy"), readme.indexOf("## Updating"))
+  check("privacy names the one host the plugin contacts", /registry\.npmjs\.org/.test(privacy), privacy.slice(0, 80))
+  check("privacy says what is sent: a package name, and nothing about the user", /asks for a package name/.test(privacy))
+  check("privacy says how often", /once every six hours/.test(privacy))
+  check("privacy says how to turn it off", /--no-update/.test(privacy) && /OPENCODE_VITALS_NO_UPDATE/.test(privacy))
+  check("and makes no blanket no-network claim", !/no network code at all/.test(readme) && !/network calls: none/.test(readme))
+  // The window it draws in has a launcher entry pointed at it. Saying so is part
+  // of the same claim: what this plugin changes on your machine.
+  check("privacy says the launcher entry it writes and when", /launcher entry is written/.test(privacy) && /Uninstalling removes it/.test(privacy))
+  // The README is also the npm package page, where a relative docs/readout.png
   // resolves to nothing. Every image must be an absolute raw link, and the file
   // it points at must be in this repository.
   const localImage = (source) => source.replace(/^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, "")
@@ -650,7 +672,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("installed manifest matches the package", JSON.parse(readFileSync(join(plugins, "opencode-vitals", "package.json"), "utf8")).version === manifest.version)
   check("the readout ships next to the plugin", existsSync(join(plugins, "opencode-vitals", "readout.mjs")))
   check("the readout's injected script is shipped", existsSync(join(plugins, "opencode-vitals", "renderer", "vitals.js")))
-  check("nested directories are created", existsSync(join(plugins, "opencode-vitals", "docs", "bar.png")))
+  check("nested directories are created", existsSync(join(plugins, "opencode-vitals", "docs", "readout.png")))
 
   const again = install({ pluginsDir: plugins, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
   check("installing twice is an update", again.action === "updated", JSON.stringify(again))
@@ -1376,19 +1398,26 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   await wait(1600)
   const ask = async (session) => (await fetch(`http://127.0.0.1:${READOUT_PORT}/vitals?session=${session}`)).json()
 
+  // The answer carries nothing but the session's settled figures. It used to also
+  // carry a provisional figure for the reply in flight, and the character count
+  // in it was proof of the problem that got it removed: tokens only arrive when a
+  // step ends, so a rate had to be counted in characters while the number beside
+  // it was counted in tokens. Two units, one row, no unit on the provisional one.
+  // A reply that has not finished has no settled rate to report, and now says so
+  // by saying nothing.
   const inFlight = await ask("ses_inflight")
-  check("a reply in flight is published", inFlight.live !== null && inFlight.live.live === true, JSON.stringify(inFlight.live))
-  check("it is marked live so it is never read as settled", inFlight.live?.live === true)
-  check("it carries its characters so far", inFlight.live?.characterCount === 600, JSON.stringify(inFlight.live?.characterCount))
-  check("it carries a rate over the real streaming span", typeof inFlight.live?.charactersPerSecond === "number" && inFlight.live.charactersPerSecond > 0, JSON.stringify(inFlight.live?.charactersPerSecond))
-  // The trap: a provisional figure folded into the session's own numbers would
-  // make them mean two things at once. A turn that has not ended is not counted.
+  check("a reply in flight publishes no figure at all", inFlight.live === undefined, JSON.stringify(inFlight))
+  check("and the response carries only the session and its totals", Object.keys(inFlight).sort().join() === "sessionID,totals", JSON.stringify(Object.keys(inFlight)))
+  // The trap that remains: a provisional figure folded into the session's own
+  // numbers would make them mean two things at once. A turn that has not ended is
+  // not counted, so a session whose only reply is still streaming has no turns.
   check("an unfinished reply is not in the totals", inFlight.totals === null, JSON.stringify(inFlight.totals))
   check("an unfinished reply does not add a turn", inFlight.totals?.turns === undefined || inFlight.totals.turns === 0)
 
-  // A session with no reply in flight reports no live number, not a stale one.
+  // A session that is not streaming at all answers the same way, so a stale
+  // figure cannot be served to a window that has moved on.
   const idle = await ask("ses_nothing_here")
-  check("a session with no live reply reports none", idle.live === null, JSON.stringify(idle.live))
+  check("a session with no reply streaming reports no figure", idle.live === undefined && idle.totals === null, JSON.stringify(idle))
   cleanup()
 }
 
@@ -1654,23 +1683,22 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     check("it says which session the dashes belong to", /ses_new/.test(row?.getAttribute("title") ?? ""), JSON.stringify(row?.getAttribute("title")))
   }
 
-  // A reply in flight, beside the session's settled figures and not mixed in.
+  // A payload that still carries a provisional figure is ignored rather than
+  // drawn. The readout used to show one beside the session's own numbers, and it
+  // was a rate in characters sitting next to a rate in tokens: a token is about
+  // four characters, so 1600 chars/s read as 1600 tok/s and was wrong by a factor
+  // of four every single time. Tokens only arrive when a step ends, so there was
+  // no honest mid-flight tok/s to show, and a labelled version of the same number
+  // would have been a second unit in a row built for one.
   {
     const win = mount()
     win.server.payload = { ...measured, live: { charactersPerSecond: 1600, stepCount: 3 } }
     await win.poll()
     const row = readout(win)
-    const live = row.children.find((kid) => kid.id === "opencode-vitals-live")
-    check("the reply in flight is shown", live?.style.display === "" && live.text.includes("1.6k"), JSON.stringify(live?.text))
-    check("it is marked as provisional and counted", live?.text.includes("now · 3 steps"), JSON.stringify(live?.text))
-    check("it does not overwrite the session's own rate", row.text.includes("129") && row.text.includes("tok/s"), row.text)
-  }
-  {
-    const win = mount()
-    win.server.payload = measured
-    await win.poll()
-    const live = readout(win).children.find((kid) => kid.id === "opencode-vitals-live")
-    check("with no reply in flight the live figure is hidden, not blank", live?.style.display === "none", JSON.stringify(live?.style.display))
+    check("a payload carrying a provisional figure draws only the session's", row.text.includes("129") && row.text.includes("tok/s"), row.text)
+    check("and adds no second figure to the row", row.text.split("tok/s").length - 1 === 1, JSON.stringify(row.text))
+    check("and leaves no element for one", row.children.every((kid) => kid.id !== "opencode-vitals-live"), JSON.stringify(row.children.map((kid) => kid.id)))
+    check("the session's four figures are the whole row", row.text.split("—").length - 1 === 0 && !row.text.includes("now"), JSON.stringify(row.text))
   }
 
   // It follows the window. A different tab is a different session, and it asks

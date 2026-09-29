@@ -137,14 +137,10 @@ let readoutEntryWarned = false
 const readoutStates = new Set()
 
 function totalsForSession(sessionID) {
-  let answer = { sessionID: typeof sessionID === "string" && sessionID ? sessionID : null, totals: null, live: null }
+  const answer = { sessionID: typeof sessionID === "string" && sessionID ? sessionID : null, totals: null }
   for (const state of readoutStates) {
     const found = state.totalsFor(sessionID)
-    // Take whichever part this state actually knows: an in-flight reply can be
-    // here before the session has any completed totals, and returning early on
-    // a null `totals` would throw that reply away.
     if (found.totals) return found
-    if (found.live) answer.live = found.live
   }
   return answer
 }
@@ -699,25 +695,6 @@ function createState(rawOptions, context = {}) {
   // streaming span is the same denominator the finished record uses, and it
   // stays null until something has actually streamed: a rate before the first
   // token would divide by almost nothing.
-  function liveRecord(turn, at) {
-    const streamMs = spanTotal(turn)
-    const characters = turn.characterCount + turn.reasoningCharacterCount
-    return {
-      sessionID: turn.sessionID,
-      live: true,
-      agent: turn.agent,
-      model: turn.model,
-      startedAt: new Date(turn.startedAt).toISOString(),
-      elapsedMs: at - turn.startedAt,
-      firstTokenMs: turn.firstTokenAt === null ? null : turn.firstTokenAt - turn.startedAt,
-      characterCount: characters,
-      toolArgCharacters: turn.toolArgCharacters,
-      stepCount: turn.stepCount,
-      charactersPerSecond: streamMs !== null && streamMs > 0 ? characters / (streamMs / 1000) : null,
-      observedAt: at,
-    }
-  }
-
   async function load() {
     if (!storage) return
     try {
@@ -1196,10 +1173,6 @@ function createState(rawOptions, context = {}) {
   // is the mistake that made a fresh tab display someone else's turns.
   function totalsFor(sessionID) {
     const totals = typeof sessionID === "string" && sessionID ? sessionTotals.get(sessionID) : null
-    // The in-flight reply, when this session has one. Provisional by nature: it
-    // is not part of the totals above, and the readout shows it dimmed beside
-    // them so a moving number is never mistaken for a settled one.
-    const turn = typeof sessionID === "string" && sessionID ? active.get(sessionID) : null
     return {
       sessionID: typeof sessionID === "string" && sessionID ? sessionID : null,
       totals: totals
@@ -1213,7 +1186,6 @@ function createState(rawOptions, context = {}) {
             updatedAt: totals.updatedAt,
           }
         : null,
-      live: turn ? liveRecord(turn, now()) : null,
     }
   }
 

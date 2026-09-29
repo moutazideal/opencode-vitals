@@ -327,13 +327,14 @@ export function removeDesktopEntry() {
 // uninstall must not do.
 export function removeReadout() {
   const entry = removeDesktopEntry()
-  let renderer = { ok: false, reason: "no renderer directory" }
+  const renderer = { ok: true, path: RENDERER_DIR }
   try {
-    rmSync(RENDERER_DIR, { recursive: true, force: true })
-    renderer = { ok: true, path: RENDERER_DIR }
+    // The whole work directory, not just the renderer inside it: leaving an
+    // empty shell behind means "uninstalled" still has a directory named after
+    // this plugin sitting in the user's data path.
+    rmSync(WORK_DIR, { recursive: true, force: true })
   } catch (error) {
-    if (error?.code !== "ENOENT") renderer = { ok: false, reason: String(error) }
-    else renderer = { ok: true, path: RENDERER_DIR }
+    if (error?.code !== "ENOENT") renderer.ok = false, (renderer.reason = String(error))
   }
   return { entry, renderer }
 }

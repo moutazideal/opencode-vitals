@@ -298,7 +298,38 @@ export function uninstall({ pluginsDir, packageRoot = PACKAGE_ROOT, name, force 
   // both must go with it: leaving them means an uninstalled plugin still changes
   // how the app starts.
   const readout = removeReadout()
-  return { target, action: "removed", wasLink: existing.kind === "link", legacy, readout }
+  // The status directory holds this plugin's own measurements: per-session totals,
+  // the version file and response markers. They live in a temporary directory,
+  // but "uninstall" that leaves them is only half an uninstall — and the next
+  // install would seed itself from the last one's numbers.
+  const status = removeStatus()
+  return { target, action: "removed", wasLink: existing.kind === "link", legacy, readout, status }
+}
+
+// Only ever removes this package's files inside the status directory, and only
+// the files this package writes. The directory is shared and 0700, but a stray
+// lock or file from a future version must survive rather than be guessed at.
+export function removeStatus({ statusDir = join(tmpdir(), "opencode-latency-monitor") } = {}) {
+  const ours = [
+    "session-totals.json",
+    "current-session.json",
+    "latest.json",
+    "plugin-version.json",
+    "popup.lock",
+  ]
+  const removed = []
+  try {
+    for (const name of readdirSync(statusDir)) {
+      // Response markers are ours by pattern: a response id and a .marker suffix.
+      if (!ours.includes(name) && !name.endsWith(".marker")) continue
+      rmSync(join(statusDir, name), { force: true })
+      removed.push(name)
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") return { removed, ok: false, reason: String(error) }
+    return { removed, ok: true }
+  }
+  return { removed, ok: true }
 }
 
 export function status({ pluginsDir, name = "opencode-vitals" } = {}) {

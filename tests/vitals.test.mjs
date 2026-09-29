@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, existsSync, utimesSync, statSync, lstatSync, symlinkSync } from "node:fs"
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, utimesSync, statSync, lstatSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -1412,6 +1412,112 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const missing = await fetch(`http://127.0.0.1:${port}/assets/nope-abc123.js`)
   check("a missing asset is still a 404", missing.status === 404, String(missing.status))
   await new Promise((resolve) => server.close(resolve))
+}
+
+// Uninstall has to take the measurements with it. They live in a temporary
+// directory, so a fresh install would otherwise seed itself from the last one's
+// numbers — and "uninstalled" would leave a readable record of every session on
+// the machine.
+{
+  const dir = mkdtempSync(join(tmpdir(), "vitals-uninstall-"))
+  const statusDir = join(dir, "opencode-latency-monitor")
+  mkdirSync(statusDir, { recursive: true })
+  // Ours: the totals, the per-project current session, the last record, the
+  // version file, a legacy lock, and a couple of response markers.
+  for (const name of [
+    "session-totals.json",
+    "current-session.json",
+    "latest.json",
+    "plugin-version.json",
+    "popup.lock",
+    "response-abc.marker",
+    "response-def.marker",
+  ]) {
+    writeFileSync(join(statusDir, name), "{}")
+  }
+  // Not ours: the directory is shared, and a file from something else — or from a
+  // future version of this plugin — must survive a guess about what we own.
+  writeFileSync(join(statusDir, "something-else.json"), "{}")
+  writeFileSync(join(statusDir, "notes.txt"), "keep me")
+
+  const { removeStatus } = await import("../install.mjs")
+  const report = removeStatus({ statusDir })
+  const left = readdirSync(statusDir).sort()
+  check("uninstall removes the session totals", !left.includes("session-totals.json"), JSON.stringify(left))
+  check("uninstall removes the current-session map", !left.includes("current-session.json"))
+  check("uninstall removes the last record", !left.includes("latest.json"))
+  check("uninstall removes the version file", !left.includes("plugin-version.json"))
+  check("uninstall removes a legacy lock", !left.includes("popup.lock"))
+  check("uninstall removes the response markers", !left.filter((n) => n.endsWith(".marker")).length === true, JSON.stringify(left))
+  check("uninstall leaves files it does not own", left.includes("something-else.json") && left.includes("notes.txt"), JSON.stringify(left))
+  check("uninstall reports what it removed", report.ok === true && report.removed.length === 7, JSON.stringify(report.removed?.length))
+  // And a directory that was never there is not an error.
+  check("a missing status directory is fine", removeStatus({ statusDir: join(dir, "nope") }).ok === true)
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// The readout leaves two things outside the plugin folder: a copy of the app's
+// renderer, and a launcher entry that makes the ordinary app icon start the app
+// pointed at that copy. Both are ours, and "uninstalled" that leaves either
+// behind is only half an uninstall.
+{
+  // The work directory is read at module load, so pointing it somewhere else
+  // means a fresh import — otherwise the removal would target the developer's
+  // real directory instead of the sandbox.
+  const home = mkdtempSync(join(tmpdir(), "vitals-readout-out-"))
+  const work = join(home, "work")
+  const apps = join(home, "applications")
+  const previousDir = process.env.OPENCODE_VITALS_DIR
+  const previousApps = process.env.XDG_DATA_HOME
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  const previousDataDirs = process.env.XDG_DATA_DIRS
+  process.env.OPENCODE_VITALS_DIR = work
+  process.env.XDG_DATA_HOME = home
+  // Removing a launcher entry needs an app, and a system entry for it to mirror
+  // by name. The suite points OPENCODE_DESKTOP_APP at nothing on purpose, so
+  // point it at a bundle this case writes and give it a matching system entry —
+  // otherwise the code under test never runs and the case passes for free.
+  const fakeApp = join(home, "App", "resources", "app.asar")
+  mkdirSync(join(home, "App", "resources"), { recursive: true })
+  writeFileSync(fakeApp, "")
+  // XDG_DATA_DIRS entries are searched with "applications" appended, and the
+  // reader matches an entry to an app by the app directory two levels up from the
+  // bundle — so both have to be right or this case passes without ever reaching
+  // the code that removes the entry.
+  const systemApps = join(home, "system", "applications")
+  mkdirSync(systemApps, { recursive: true })
+  writeFileSync(join(systemApps, "ai.opencode.desktop.desktop"), ["[Desktop Entry]", "Name=OpenCode", `Exec=${join(home, "App", "ai.opencode.desktop")} %U`, ""].join("\n"))
+  process.env.OPENCODE_DESKTOP_APP = fakeApp
+  process.env.XDG_DATA_DIRS = join(home, "system")
+  const { removeReadout } = await import(`../readout.mjs?out=${Date.now()}`)
+
+  // Build the shape a real install leaves: a renderer copy and a marked entry.
+  mkdirSync(join(work, "renderer"), { recursive: true })
+  writeFileSync(join(work, "renderer", "index.html"), "<!doctype html>")
+  mkdirSync(apps, { recursive: true })
+  writeFileSync(join(apps, "ai.opencode.desktop.desktop"), "X-OpenCode-Vitals=readout\n")
+
+  const gone = removeReadout()
+  check("the readout removes the whole work directory, not just the renderer", !existsSync(work), JSON.stringify(readdirSync(home)))
+  check("the readout removes the launcher entry", !existsSync(join(apps, "ai.opencode.desktop.desktop")))
+  check("it reports both halves", gone.entry !== undefined && gone.renderer !== undefined, JSON.stringify(gone))
+  // A second removal is not an error: uninstall can be run twice.
+  check("removing again is harmless", removeReadout().renderer.ok === true)
+
+  // An entry we did not write is left alone: the user may have edited it.
+  writeFileSync(join(apps, "ai.opencode.desktop.desktop"), "[Desktop Entry]\nName=OpenCode\n")
+  const kept = removeReadout()
+  check("a launcher entry we did not write is left alone", kept.entry.ok === false && existsSync(join(apps, "ai.opencode.desktop.desktop")), JSON.stringify(kept.entry))
+
+  if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = previousDir
+  if (previousApps === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = previousApps
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
+  if (previousDataDirs === undefined) delete process.env.XDG_DATA_DIRS
+  else process.env.XDG_DATA_DIRS = previousDataDirs
+  rmSync(home, { recursive: true, force: true })
 }
 
 for (const result of results) {

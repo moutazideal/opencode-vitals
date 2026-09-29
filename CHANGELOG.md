@@ -4,6 +4,81 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-09-29
+
+OpenCode is never allowed to stop opening. Everything else in this release is in
+service of that, including two bugs this one introduced and one it could not
+have fixed from where it was standing.
+
+### Fixed
+
+- **The readout could stop OpenCode from opening at all.** An empty window with
+  a 404 on `index.html`, reported on a real machine after adding the plugin. The
+  server is not a side channel: the launcher entry points the whole application
+  at it, so a 404 is not a missing readout, it is an application that will not
+  start. The entry was being written on every start whatever the copy was doing,
+  so a copy emptied behind our back — an uninstall while OpenCode is open, an
+  `rm -rf`, a failed sync, a tmp reaper — left the app pointed at a server with
+  nothing to serve, until the next ten-minute tick, and for good if the rebuild
+  was what had failed. The entry is now written only while there is something to
+  serve and removed when there is not, and the ten-minute tick makes the same
+  decision, so anything that empties the directory is noticed whatever the cause.
+- **A request that missed rebuilt the copy and was answered.** This is what
+  closes the window for every cause at once, without this having to know which
+  one happened. The cost is a rebuild that blocks the plugin host's event loop
+  for as long as the copy takes, which is a trade made on purpose: a two-second
+  pause in measuring against an application that will not open.
+- **A rebuild no longer deletes the copy before making it.** It builds beside the
+  copy and renames, which is atomic, so a reader sees the old copy or the new
+  one. A failure in between used to leave no `index.html` at all — a broken
+  application, left behind by a plugin that draws numbers.
+- **The listening socket is closed with the plugin that opened it.** `unref()`
+  stops it holding the event loop open, which is a different thing: the port
+  stayed taken, so a reloaded plugin was refused the bind and left with no server
+  at all. A readout that stops silently, on every reload.
+- **Installing fetches the current release, not only registers the package.**
+  OpenCode checks unpinned packages for updates on startup and deliberately does
+  not swap the installed one, so a machine that resolved this package while an
+  older version was the latest kept it indefinitely — and a version without an
+  update check cannot get itself out, because the code that would fix it is the
+  code that is not running. Found by installing over a real 0.1.7 and watching
+  the old window's files appear in the status directory.
+- **The readout gives up its row when the plugin that feeds it is gone.**
+  Uninstalling while a window was open left four dashes sitting in the composer
+  forever. It goes after ten failed polls and comes straight back if the server
+  does.
+- **An OpenCode update was silent.** A window left open across one went on
+  running the old app's code against the new service, with nothing to say so. It
+  says so now, once per update.
+
+### Added
+
+- **Installing registers the package with OpenCode and keeps it current.**
+  `npx opencode-vitals install` runs `opencode plugin add`, OpenCode fetches the
+  package and checks it on every start, and this plugin applies an update it
+  finds through OpenCode's own updater — the binary already running it — and
+  tells you to restart. `--no-update` turns it off for good.
+- **The launcher entry and the copy of the app's interface are made by the
+  plugin, not by the installer.** `opencode plugin add` runs none of this
+  package's code, so a plugin that set itself up only when its own installer ran
+  would have been a plugin with no readout.
+
+### Changed
+
+- The readout is now served from inside OpenCode's own composer rather than a
+  window on top of it, and shows the reply in flight beside the session's own
+  figures without ever folding a provisional rate into them.
+- `npx opencode-vitals selftest` no longer writes anything. It used to prove it
+  could copy the app's renderer by copying it, so running the check on a clean
+  machine left 43MB behind — and a check that mutates cannot be run twice to see
+  whether anything changed.
+
+### Measured
+
+- 363 checks, up from 257. Fewer things have no tests at all now: the renderer in
+  the app's own window, the update path, and the states in which OpenCode must
+  still open.
+
 ## [0.1.8] - 2026-09-29
 
 The window is gone. The numbers are drawn by OpenCode's own UI now.

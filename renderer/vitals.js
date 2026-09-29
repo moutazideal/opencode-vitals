@@ -6,7 +6,8 @@
 //
 // Three rules this file lives by:
 //   1. It never breaks OpenCode. Every step is guarded, and a failure is silent —
-//      a readout is a nicety, the editor is the product.
+//      a readout is a nicety, the editor is the product. And it never outlives
+//      its own data: a row left showing dashes is a measurement that is not one.
 //   2. It never shows a number it cannot attribute. A session with no totals
 //      renders a dash, not another session's turns.
 //   3. It follows the app. The session shown is read from the app's own active
@@ -16,6 +17,17 @@ const SLOT = "composer-actions"
 const TAB = '[data-slot="titlebar-tab-item"][data-active="true"]'
 const ID = "opencode-vitals-readout"
 const POLL_MS = 1000
+
+// How many polls in a row have to fail before the row gives up on its server.
+//
+// Long enough that a plugin which is merely slow to start — which is what a cold
+// OpenCode looks like, since the service loads the plugin while the window is
+// already painting — is not punished for it. Short enough that uninstalling
+// while a window is open is something you can see happen.
+//
+// The row comes back by itself the moment the server answers again, so this
+// cannot strand a readout that had merely gone quiet.
+const GIVE_UP_AFTER = 10
 
 // What each reading is called in the row. The unit is the word that makes the
 // number readable without a legend: "123 tok/s" and "114 last10" say what they
@@ -59,6 +71,10 @@ const currentSession = () => {
 let root = null
 let live = null
 const parts = {}
+// Polls in a row that have found no server, and whether there is anything to show
+// at all. See GIVE_UP_AFTER.
+let misses = 0
+let wanted = false
 
 const build = () => {
   root = document.createElement("div")
@@ -123,7 +139,11 @@ const anchor = () => {
   return row?.parentElement ?? null
 }
 
+// Put the row in, if there is a row worth having. `wanted` is what makes this
+// safe to call from the mutation observer: the composer re-renders constantly, and
+// without it a row that was taken away would be put straight back.
 const place = () => {
+  if (!wanted) return false
   if (root?.isConnected) return true
   const host = anchor()
   if (!host) return false
@@ -198,9 +218,30 @@ const tick = async () => {
     // The server going away must not take the editor with it.
   }
 
+  // A server that answers and a session with no numbers are different things.
+  // Only the first failure means there is no longer anything here to read: an
+  // empty answer is a session that has not been measured yet, and it stays a
+  // dash because a dash is honest where a neighbour's numbers would not be.
+  if (payload) {
+    misses = 0
+    wanted = true
+  } else if (++misses >= GIVE_UP_AFTER) {
+    // The server is not coming back — this is what uninstalling looks like from
+    // in here. A row that outlives its data is worse than no row, because it
+    // looks like a reading.
+    wanted = false
+    root?.remove()
+    return
+  }
+
+  // Asked on every tick, and separately from placing: "the app renamed the slot"
+  // is the failure that leaves no other trace anywhere, so the server has to hear
+  // it. A blank row is not a report, though — nothing is placed until there is
+  // something to put in it.
   const placed = Boolean(place())
   const slots = document.querySelectorAll("[data-slot]").length
-  report(placed, `${placed ? "composer-actions" : `composer-actions absent; slots=${slots}`}; session=${sessionID ?? "none"}`)
+  const where = placed ? "composer-actions" : `composer-actions absent; slots=${slots}`
+  report(placed, `${where}; session=${sessionID ?? "none"}${payload ? "" : "; no data yet"}`)
   if (payload && placed) {
     paint(payload)
     paintLive(payload.live ?? null)

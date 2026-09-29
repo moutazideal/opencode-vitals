@@ -1690,7 +1690,19 @@ export default {
         startReadout(state)
         companionTimer = setInterval(() => {
           const synced = syncReadout()
-          if (!synced.ok) state.warn(ctx, `readout: ${synced.reason}`)
+          if (!synced.ok) {
+            state.warn(ctx, `readout: ${synced.reason}`)
+            return
+          }
+          // The copy is refreshed when OpenCode updates itself, but the open
+          // window is still running the page it loaded before that — the old
+          // app's code against the new service, with nothing on screen to say
+          // so. Only a reload takes the new copy, only the user can reload, and
+          // `changed` is true once per update rather than once per poll, so this
+          // is said exactly when it is true.
+          if (synced.changed) {
+            state.warn(ctx, "OpenCode updated itself: reload the window (Ctrl+R) for the readout to match it")
+          }
         }, READOUT_SYNC_INTERVAL_MS)
         companionTimer.unref?.()
         runtime.companionTimer = companionTimer

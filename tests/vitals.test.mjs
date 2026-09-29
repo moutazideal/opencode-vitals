@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import * as vm from "node:vm"
 import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, utimesSync, statSync, lstatSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -1517,6 +1518,307 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   else process.env.OPENCODE_DESKTOP_APP = previousApp
   if (previousDataDirs === undefined) delete process.env.XDG_DATA_DIRS
   else process.env.XDG_DATA_DIRS = previousDataDirs
+  rmSync(home, { recursive: true, force: true })
+}
+
+// The readout is the one part of this package that runs somewhere else entirely:
+// inside OpenCode's renderer, against a DOM this suite does not have. It is
+// browser code, so it was being shipped untested — and it is the part a user
+// looks at. A stub DOM is sixty lines and buys the real file under test.
+{
+  const source = readFileSync(new URL("../renderer/vitals.js", import.meta.url), "utf8")
+
+  // Enough of an element for the readout: the properties it touches, and nothing
+  // else. Anything the script starts using that is missing here fails loudly
+  // rather than quietly, which is the point of testing the real file.
+  const element = (tag) => {
+    const attributes = new Map()
+    const node = {
+      tagName: tag,
+      textContent: "",
+      isConnected: false,
+      children: [],
+      style: {
+        cssText: "",
+        display: "",
+        setProperty(key, value) { this[key] = value },
+        removeProperty(key) { delete this[key] },
+      },
+      setAttribute(key, value) { attributes.set(key, String(value)) },
+      getAttribute(key) { return attributes.has(key) ? attributes.get(key) : null },
+      append(...kids) { for (const kid of kids) { kid.isConnected = true; kid.parent = node; node.children.push(kid) } },
+      insertBefore(kid) { kid.isConnected = true; kid.parent = node; node.children.unshift(kid) },
+      // Removal detaches from the parent, which is the whole reason a withdrawn
+      // row is gone. A stub that only unset a flag would pass a row that is still
+      // sitting in the composer.
+      remove() {
+        const at = node.parent?.children.indexOf(node) ?? -1
+        if (at >= 0) node.parent.children.splice(at, 1)
+        node.isConnected = false
+      },
+      get firstChild() { return node.children[0] ?? null },
+      get text() { return node.children.map((kid) => kid.textContent).join("") },
+    }
+    return node
+  }
+
+  // One window's worth of DOM: a composer with a slot to sit in, a titlebar whose
+  // active tab says which session is on screen, and a fetch the test answers.
+  const mount = ({ href = "/session/ses_abc123" } = {}) => {
+    const host = element("div")
+    const server = { payload: null, fail: false }
+    const asked = []
+    let tick = null
+    let mutated = null
+    const tabHref = { value: href }
+    const sandbox = {
+      console,
+      URLSearchParams,
+      setInterval: (fn) => { tick = fn; return { unref() {} } },
+      MutationObserver: class {
+        constructor(callback) { mutated = callback }
+        observe() {}
+      },
+      document: {
+        readyState: "complete",
+        documentElement: element("html"),
+        addEventListener() {},
+        createElement: element,
+        querySelector: (selector) => {
+          if (selector.includes("titlebar-tab-item")) {
+            return { getAttribute: (key) => (key === "href" ? tabHref.value : null) }
+          }
+          if (selector.includes("composer-actions")) return host
+          return null
+        },
+        querySelectorAll: () => new Array(6).fill(element("div")),
+      },
+      fetch: async (url) => {
+        asked.push(String(url))
+        if (server.fail) throw new Error("no server")
+        return { ok: true, json: async () => server.payload }
+      },
+    }
+    vm.createContext(sandbox)
+    vm.runInContext(source, sandbox)
+    return {
+      host,
+      asked,
+      server,
+      // The app re-renders its composer, which takes our node with it. This is
+      // what the readout has to notice, and it is the only reason it polls and
+      // observes at all.
+      rerender: () => {
+        for (const kid of host.children) kid.isConnected = false
+        host.children.length = 0
+        mutated?.()
+      },
+      switchTo: (next) => { tabHref.value = next },
+      poll: async () => { await tick(); await new Promise((resolve) => setImmediate(resolve)) },
+    }
+  }
+
+  const totals = { turns: 9, steps: 35, tokensPerSecond: 129, recentRates: [120, 108] }
+  const readout = (win) => win.host.children.find((kid) => kid.getAttribute("data-vitals") === "readout")
+  const measured = { sessionID: "ses_abc123", totals }
+
+  // The ordinary case: a measured session, drawn in the row the app already has.
+  {
+    const win = mount()
+    win.server.payload = measured
+    await win.poll()
+    const row = readout(win)
+    check("the readout is placed in the composer's row", Boolean(row), JSON.stringify(win.host.children.length))
+    check("it shows the session's own numbers", row.text.includes("9") && row.text.includes("35") && row.text.includes("129"), row.text)
+    check("it labels the rate rather than showing a bare number", row.text.includes("tok/s"), row.text)
+    check("it shows the mean of the recent rates", row.text.includes("114"), row.text)
+    check("it asks for the session the window is showing", win.asked.some((url) => url.includes("session=ses_abc123")), JSON.stringify(win.asked))
+  }
+
+  // A session with no numbers is a dash. It is never a neighbour's numbers, and
+  // it is never nothing at all — an empty row is a bug you cannot see.
+  {
+    const win = mount()
+    win.server.payload = { sessionID: "ses_new", totals: null }
+    await win.poll()
+    const row = readout(win)
+    check("an unmeasured session renders dashes", (row?.text.match(/—/g) ?? []).length === 4, JSON.stringify(row?.text))
+    check("it says which session the dashes belong to", /ses_new/.test(row?.getAttribute("title") ?? ""), JSON.stringify(row?.getAttribute("title")))
+  }
+
+  // A reply in flight, beside the session's settled figures and not mixed in.
+  {
+    const win = mount()
+    win.server.payload = { ...measured, live: { charactersPerSecond: 1600, stepCount: 3 } }
+    await win.poll()
+    const row = readout(win)
+    const live = row.children.find((kid) => kid.id === "opencode-vitals-live")
+    check("the reply in flight is shown", live?.style.display === "" && live.text.includes("1.6k"), JSON.stringify(live?.text))
+    check("it is marked as provisional and counted", live?.text.includes("now · 3 steps"), JSON.stringify(live?.text))
+    check("it does not overwrite the session's own rate", row.text.includes("129") && row.text.includes("tok/s"), row.text)
+  }
+  {
+    const win = mount()
+    win.server.payload = measured
+    await win.poll()
+    const live = readout(win).children.find((kid) => kid.id === "opencode-vitals-live")
+    check("with no reply in flight the live figure is hidden, not blank", live?.style.display === "none", JSON.stringify(live?.style.display))
+  }
+
+  // It follows the window. A different tab is a different session, and it asks
+  // the server for that one rather than the one it happened to start on.
+  {
+    const win = mount()
+    win.server.payload = measured
+    await win.poll()
+    win.switchTo("/session/ses_second")
+    win.server.payload = { sessionID: "ses_second", totals: { ...totals, turns: 4 } }
+    await win.poll()
+    check("it asks for the newly opened session", win.asked.at(-1).includes("session=ses_second"), JSON.stringify(win.asked.at(-1)))
+    check("and paints that session's numbers", readout(win).text.includes("4"), readout(win).text)
+  }
+  // The app re-renders its composer and takes the node with it. Nothing is
+  // polled between the re-render and the check, so what puts the row back is the
+  // mutation observer rather than the next tick — which is the difference between
+  // a row that survives a session switch and one that blinks out for a second.
+  {
+    const win = mount()
+    win.server.payload = measured
+    await win.poll()
+    win.rerender()
+    check("a re-rendering composer does not lose the row", Boolean(readout(win)), JSON.stringify(win.host.children.length))
+    check("and it is put back once, not duplicated", win.host.children.length === 1, JSON.stringify(win.host.children.length))
+    // A session switch re-renders and changes the answer in the same breath.
+    win.rerender()
+    win.switchTo("/session/ses_second")
+    win.server.payload = { sessionID: "ses_second", totals }
+    await win.poll()
+    check("the row survives a session switch", Boolean(readout(win)) && readout(win).text.includes("129"), readout(win)?.text)
+  }
+
+  // The server going away. This is what uninstalling looks like from in here, and
+  // a row that outlives its data is worse than no row: it looks like a reading.
+  {
+    const win = mount()
+    win.server.payload = measured
+    await win.poll()
+    check("the row is there while the server answers", Boolean(readout(win)))
+    win.server.fail = true
+    for (let poll = 0; poll < 3; poll += 1) await win.poll()
+    check("a few failed polls do not take the row away — a slow-starting plugin is not a failure", Boolean(readout(win)))
+    for (let poll = 0; poll < 8; poll += 1) await win.poll()
+    check("a server that is not coming back takes the row with it", !readout(win), JSON.stringify(win.host.children.length))
+    win.rerender()
+    check("a re-rendering composer does not bring it back", !readout(win), JSON.stringify(win.host.children.length))
+    for (let poll = 0; poll < 5; poll += 1) await win.poll()
+    check("it stays away while the server is still gone", !readout(win))
+  }
+  // A server that comes back — the plugin reloading, a reinstall — brings the row
+  // with it, so a quiet moment is never permanent.
+  {
+    const win = mount()
+    win.server.payload = measured
+    await win.poll()
+    win.server.fail = true
+    for (let poll = 0; poll < 12; poll += 1) await win.poll()
+    check("the row went away", !readout(win))
+    win.server.fail = false
+    win.server.payload = measured
+    await win.poll()
+    check("it comes back when the server does", Boolean(readout(win)), JSON.stringify(win.host.children.length))
+    check("and it comes back with numbers, not dashes", readout(win).text.includes("129"), readout(win).text)
+  }
+
+  // Windows that are not ready: no tab to name a session, and a server that never
+  // answers from the first tick. Neither may throw, and neither may guess.
+  {
+    const win = mount({ href: "/somewhere-else" })
+    win.server.payload = measured
+    await win.poll()
+    check("with no session in the titlebar it asks without one", win.asked.includes("/vitals"), JSON.stringify(win.asked))
+    check("and it still shows what it was given", readout(win).text.includes("129"), readout(win).text)
+  }
+  {
+    const win = mount()
+    win.server.fail = true
+    await win.poll()
+    check("a window opened while the server is down is not a crash", win.host.children.length === 0, JSON.stringify(win.host.children.length))
+  }
+}
+
+// "When OpenCode updates itself, does the readout put itself back?" — the whole
+// copy is a cache of somebody else's files, so the only thing that makes it
+// survive an app update is noticing that the app changed. The asar reader and the
+// injection are tested above; this is the loop that ties them to a timer.
+{
+  const home = mkdtempSync(join(tmpdir(), "vitals-update-"))
+  const work = join(home, "work")
+  const previousDir = process.env.OPENCODE_VITALS_DIR
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  process.env.OPENCODE_VITALS_DIR = work
+  process.env.OPENCODE_DESKTOP_APP = join(home, "App", "resources", "app.asar")
+  mkdirSync(join(home, "App", "resources"), { recursive: true })
+  const { syncRenderer } = await import(`../readout.mjs?update=${Date.now()}`)
+
+  // A stand-in for a released app: a bundle, a page that loads it, and a version
+  // of the page. Rewriting the page is what an app update does to it.
+  const writeBundle = (page) => {
+    const json = Buffer.from(JSON.stringify({ files: { out: { files: { renderer: { files: {
+      "index.html": { size: page.length, offset: "0" },
+    } } } } } }), "utf8")
+    const padding = (4 - (json.length % 4)) % 4
+    const header = Buffer.alloc(16)
+    header.writeUInt32LE(4, 0)
+    header.writeUInt32LE(8 + json.length + padding, 4)
+    header.writeUInt32LE(json.length + padding, 8)
+    header.writeUInt32LE(json.length, 12)
+    writeFileSync(
+      process.env.OPENCODE_DESKTOP_APP,
+      Buffer.concat([header, json, Buffer.alloc(padding), page]),
+    )
+    return page.toString("utf8")
+  }
+  const copied = () => {
+    try {
+      return readFileSync(join(work, "renderer", "index.html"), "utf8")
+    } catch {
+      return null
+    }
+  }
+  const version = (n) => `<!doctype html><meta name="build" content="${n}"><script type="module" crossorigin src="./assets/main-abc123.js"></script>`
+
+  // Written before the first sync, because a bundle that is not there is an app
+  // that is not installed — which is a different case, tested above.
+  writeBundle(Buffer.from(version(1)))
+  const first = syncRenderer()
+  check("the first sync copies the app's renderer", first.ok === true && first.changed === true, JSON.stringify(first))
+  check("and the copy is the app's own page with the readout added", /build" content="1"/.test(copied() ?? "") && /vitals\.js/.test(copied() ?? ""), JSON.stringify(copied()))
+  check("the readout script is copied in beside it", existsSync(join(work, "renderer", "vitals.js")))
+
+  // This is the check that matters for cost, not just correctness: the timer runs
+  // every ten minutes for the life of the machine, and a renderer is tens of
+  // megabytes. An unchanged app must not be copied again.
+  const again = syncRenderer()
+  check("an app that has not changed is not copied again", again.ok === true && again.changed === false, JSON.stringify(again))
+  check("and the copy is left exactly as it was", /build" content="1"/.test(copied() ?? ""), JSON.stringify(copied()))
+
+  // The update itself.
+  writeBundle(Buffer.from(version(2)))
+  const updated = syncRenderer()
+  check("an updated app is noticed", updated.ok === true && updated.changed === true, JSON.stringify(updated))
+  check("the copy is replaced, not merged — a stale asset would outlive the app", !/build" content="1"/.test(copied() ?? ""), JSON.stringify(copied()))
+  check("the new page carries the readout too", /build" content="2"/.test(copied() ?? "") && /vitals\.js/.test(copied() ?? ""), JSON.stringify(copied()))
+  check("and it is injected once, not twice", (copied()?.match(/vitals\.js/g) ?? []).length === 1, JSON.stringify(copied()))
+
+  // A new version of *this* plugin changes nothing about the app, so it must not
+  // churn the copy either.
+  const stable = syncRenderer()
+  check("and then it settles again", stable.changed === false, JSON.stringify(stable))
+
+  if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = previousDir
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
   rmSync(home, { recursive: true, force: true })
 }
 

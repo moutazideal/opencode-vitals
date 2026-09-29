@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 The window is gone. The numbers are drawn by OpenCode's own UI now.
 
+### Added
+
+- **The numbers move while a reply is streaming.** They used to be written only
+  when a response finished, so the readout sat on the previous reply's figures for
+  the whole of the current one — the one moment they are worth watching. The
+  figures for a reply in progress now appear beside the session's, dimmed and
+  labelled `now`, and they are never folded into the session's own totals: a rate
+  that will still change, counted as though it had not, would make one number mean
+  two things at once.
+
 ### Changed
 
 - **The readout lives inside OpenCode's composer.** The row that already holds
@@ -45,6 +55,13 @@ The window is gone. The numbers are drawn by OpenCode's own UI now.
 - 142 bar checks, replaced by 24 that cover what is left — the asar reader
   against the documented format, the injection, the launcher entry, and the
   numbers the readout is actually served.
+- **`latest.json` and `current-session.json`**, which existed only to tell a
+  separate process which session was on screen. The readout is asked directly, so
+  the second was taking a storage lock — the same one the totals take — on every
+  prompt, to write a file nobody read.
+- **Eight of the nine fields in the shared plugin state**, which tracked a
+  spawned bar's retries, and with them the two functions that existed only to
+  feed them.
 
 ### Fixed
 
@@ -59,10 +76,28 @@ The window is gone. The numbers are drawn by OpenCode's own UI now.
   whether or not anything can draw them.
 - The listening socket no longer holds the event loop open, so importing this no
   longer leaves a process hanging on exit.
+- **The package depended on itself.** `"dependencies": {"opencode-vitals":
+  "^0.1.7"}` arrived by accident in a documentation commit. Anyone who installed
+  it pulled a second copy of this plugin into their `node_modules` — the previous
+  one, complete with the Python window. This had not shipped, but it broke the
+  zero-dependency promise outright.
+- **The readout had no way to report that it was missing.** The one diagnostic
+  for "the app renamed a slot and the row silently is not there" was answered
+  with the app's whole HTML page, once a second, forever. It is answered now, and
+  a failure is reported once rather than continuously.
+- **Uninstall left half of itself behind.** It emptied the work directory without
+  removing it, and left the measurements in the temporary directory: a readable
+  record of every session on the machine, and a fresh install that seeded itself
+  from the last one's numbers. Both are gone; anything in that shared directory
+  that is not this plugin's is left alone.
+- `npx opencode-vitals selftest` reported the `.desktop` directories when the
+  paths it had actually searched were the app bundles, and the installer still
+  told the user a window was about to appear.
+- `docs/desktop.png` is used by this page and was not in the shipped file list.
 
 ### Measured
 
-- 215 checks, down from 257. Fewer because a window is gone; the ones that remain
+- 248 checks, down from 257. Fewer because a window is gone; the ones that remain
   cover the measurement, the readout, and the failure modes of both.
 
 ## [0.1.7] - 2026-09-28

@@ -239,7 +239,35 @@ export function runCli(cli, args, { timeout = 120_000, spawn: run = spawnSync } 
 // So this is two commands, and the second is the one that matters. A fresh
 // machine has nothing cached and gets the latest either way, which is why this
 // only shows up on the machines that are already broken.
-export function register({ cli = findOpenCodeCli(), name = "opencode-vitals", run = runCli } = {}) {
+// What version OpenCode actually has, as it reports it.
+//
+// This exists because the updater's exit code is not a statement about the
+// outcome. On this machine it fetches the release correctly and then exits
+// non-zero with a stack trace from its own bundle, every single time. Reading
+// that as "the update failed" produced a message that was confidently wrong, and
+// removing the claim still left a scary line on every install — which trains a
+// reader to skip the line that matters. The version is the thing worth knowing,
+// and the version can be asked for.
+export function installedVersion({ cli, name, run = runCli } = {}) {
+  if (!cli) return { version: null, reason: "no OpenCode CLI" }
+  const result = run(cli, ["plugin", "list"])
+  if (!result.ok) return { version: null, reason: result.reason }
+  // A table: ID, VERSION, SOURCE. Names carry no spaces, so the first field of a
+  // row is the id and the second is the version.
+  for (const line of String(result.output ?? "").split("\n")) {
+    const [id, version] = line.trim().split(/\s+/)
+    if (id === name && /^\d+\.\d+\.\d+/.test(version ?? "")) return { version }
+  }
+  return { version: null, reason: "not listed" }
+}
+
+export function register({
+  cli = findOpenCodeCli(),
+  name = "opencode-vitals",
+  expected,
+  run = runCli,
+  ask = installedVersion,
+} = {}) {
   if (!cli) {
     return {
       ok: false,
@@ -249,16 +277,21 @@ export function register({ cli = findOpenCodeCli(), name = "opencode-vitals", ru
   }
   const added = run(cli, ["plugin", "add", name])
   if (!added.ok) return { ok: false, cli, reason: added.reason }
+  // The update is asked for, and its exit code is not believed: a version before
+  // the check existed cannot get itself out of a stale cache, so this command has
+  // to run, and on this machine it succeeds while reporting failure.
   const updated = run(cli, ["plugin", "update", name])
+  const found = ask({ cli, name, run })
+  const current = found.version && expected ? compareVersions(found.version, expected) >= 0 : null
   return {
     ok: true,
     cli,
     output: added.output,
-    // Registration is what makes the plugin load; the update is what makes it the
-    // right one. They are reported apart because a machine that is stuck on an
-    // old version is a different problem from a machine that is not installed.
-    updated: updated.ok,
-    updateReason: updated.ok ? null : updated.reason,
+    version: found.version,
+    // Three outcomes and no fourth: the version OpenCode has is the fact, and
+    // whether it is the one being installed is a comparison, not a guess.
+    state: found.version === null ? "unknown" : current ? "current" : "outdated",
+    reason: found.reason ?? (updated.ok ? null : updated.reason),
   }
 }
 
@@ -708,16 +741,19 @@ function main(argv) {
         process.stdout.write(`removing the copy at ${stale.target}, which the registered package replaces\n`)
         uninstall({ pluginsDir, force: true })
       }
-      process.stdout.write(
-        `registered ${readManifest().name} with OpenCode${registered.cli ? ` (${registered.cli})` : ""}\n` +
-          (registered.updated
-            ? "OpenCode downloads it in the background and checks it for updates on every start.\n"
-            : `OpenCode has it, but its own updater reported a problem while fetching the current release:\n` +
-              `  ${registered.updateReason}\n` +
-              "  If you were on an older release it may still be the one loaded. This plugin tries\n" +
-              "  again on its next start and says so in the log if it cannot.\n") +
-          "This plugin applies an update it finds and tells you to restart.\n",
-      )
+      const manifest = readManifest()
+      const reported = [
+        `registered ${manifest.name} with OpenCode${registered.cli ? ` (${registered.cli})` : ""}`,
+        registered.version
+          ? `OpenCode has ${registered.version}${registered.state === "outdated" ? `, not ${manifest.version}` : ""}`
+          : "OpenCode did not say which version it has",
+        registered.state === "outdated"
+          ? `  it will try again on its next start, and says so in the log if it cannot. Otherwise: opencode plugin update ${manifest.name}`
+          : null,
+        "OpenCode checks it for updates on every start.",
+        "This plugin applies an update it finds and tells you to restart.",
+      ].filter(Boolean)
+      process.stdout.write(`${reported.join("\n")}\n`)
       if (options.update) setUpdateDisabledMarker(false)
       process.stdout.write("\nRestart OpenCode. The numbers appear in the composer.\n")
       return 0

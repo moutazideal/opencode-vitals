@@ -1834,7 +1834,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
 // subprocess, so both are pinned here with a fake: a test that reached a real
 // OpenCode would rewrite the config of whoever ran the suite.
 {
-  const { findOpenCodeCli, isRegistered, register, unregister, runCli } = await import("../install.mjs")
+  const { findOpenCodeCli, installedVersion, isRegistered, register, unregister, runCli } = await import("../install.mjs")
   const home = mkdtempSync(join(tmpdir(), "vitals-cli-"))
   const config = join(home, "config", "opencode")
   mkdirSync(config, { recursive: true })
@@ -1895,19 +1895,46 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     return { ok: result.ok, output: result.output ?? "", reason: result.reason ?? "" }
   }
   write('{"plugins": ["opencode-vitals"]}')
-  const added = register({ cli, name: "opencode-vitals", run: fake({ ok: true, output: "added" }) })
-  check("registering asks OpenCode to add the package", added.ok === true && calls.at(-2)[1] === "plugin" && calls.at(-2)[2] === "add" && calls.at(-2)[3] === "opencode-vitals", JSON.stringify(calls.at(-2)))
+  // A table exactly as the CLI prints it, which is what the outcome is read from.
+  const listing = (version) => `ID               VERSION  SOURCE\ncommandcode-go   0.2.0    @wallbreakerno4/x\nopencode-vitals  ${version}    opencode-vitals\n`
+  // No injected `ask`, so the listing is read through the same runner and the
+  // commands it issued are all visible.
+  const added = register({ cli, name: "opencode-vitals", expected: "0.1.10", run: (binary, args) => fake({ ok: true, output: args[1] === "list" ? listing("0.1.10") : "added" })(binary, args) })
+  check("registering asks OpenCode to add the package", added.ok === true && calls.at(-3)[1] === "plugin" && calls.at(-3)[2] === "add" && calls.at(-3)[3] === "opencode-vitals", JSON.stringify(calls.at(-3)))
   // The second command is the one that matters. OpenCode checks unpinned
   // packages for updates and does not swap the installed one, so a machine that
   // resolved this package while an older version was latest keeps it forever —
   // and a version without an update check cannot get itself out.
-  check("and then asks it to fetch the current release", calls.at(-1)[2] === "update" && calls.at(-1)[3] === "opencode-vitals", JSON.stringify(calls.at(-1)))
-  check("which is reported separately from registering", added.updated === true && added.updateReason === null, JSON.stringify(added))
+  check("and then asks it to fetch the current release", calls.at(-2)[2] === "update" && calls.at(-2)[3] === "opencode-vitals", JSON.stringify(calls.at(-2)))
+  check("and then asks which version it ended up with", calls.at(-1)[1] === "plugin" && calls.at(-1)[2] === "list", JSON.stringify(calls.at(-1)))
+  check("the version is what is reported, not the exit code", added.version === "0.1.10" && added.state === "current", JSON.stringify(added))
 
-  const staleAdd = register({ cli, name: "opencode-vitals", run: (binary, args) => (args[1] === "update" ? { ok: false, reason: "npm ERR! 500" } : { ok: true, output: "added" }) })
-  check("a registered-but-stale install is not reported as a success", staleAdd.ok === true && staleAdd.updated === false && /500/.test(staleAdd.updateReason ?? ""), JSON.stringify(staleAdd))
+  // The case this machine actually hit: the updater fetched the release and then
+  // exited non-zero with a stack trace out of its own bundle. Believing the exit
+  // code made every install announce a failure that had not happened.
+  const noisy = register({
+    cli,
+    name: "opencode-vitals",
+    expected: "0.1.10",
+    run: (binary, args) => (args[1] === "update" ? { ok: false, reason: "at cli.plugin.update (definition)" } : { ok: true, output: args[1] === "list" ? listing("0.1.10") : "added" }),
+  })
+  check("an updater that complains while succeeding is not a failure", noisy.ok === true && noisy.state === "current" && noisy.version === "0.1.10", JSON.stringify(noisy))
+  check("the version is read out of OpenCode's own listing", installedVersion({ cli, name: "opencode-vitals", run: fake({ ok: true, output: listing("0.1.9") }) }).version === "0.1.9")
+  check("a plugin that is not listed has no version to report", installedVersion({ cli, name: "absent", run: fake({ ok: true, output: listing("0.1.10") }) }).version === null)
+  check("and a listing that fails says so rather than guessing", installedVersion({ cli, name: "opencode-vitals", run: fake({ ok: false, reason: "no cli" }) }).reason === "no cli")
+
+  // The other direction, and the one that matters: a silent failure. The command
+  // exits clean, nothing on disk says otherwise, and OpenCode still has the old
+  // version. Only asking catches this.
+  const stale = register({
+    cli,
+    name: "opencode-vitals",
+    expected: "0.1.10",
+    run: (binary, args) => ({ ok: true, output: args[1] === "list" ? listing("0.1.7") : "added" }),
+  })
+  check("an install that leaves an older version is reported as one", stale.ok === true && stale.state === "outdated" && stale.version === "0.1.7", JSON.stringify(stale))
+  check("a newer version than expected is not a problem", register({ cli, name: "opencode-vitals", expected: "0.1.10", run: fake({ ok: true, output: listing("0.2.0") }), ask: () => ({ version: "0.2.0" }) }).state === "current")
   check("while a failure to register still is a failure", register({ cli, name: "opencode-vitals", run: fake({ ok: false, reason: "nope" }) }).ok === false)
-
   const noCli = register({ cli: null, name: "opencode-vitals" })
   check("with no CLI it says what to run instead", noCli.ok === false && /opencode plugin add opencode-vitals/.test(noCli.command ?? ""), JSON.stringify(noCli))
 
@@ -1925,9 +1952,9 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // rather than the first, because that is where a package manager explains.
   const spawnResult = (status, stdout, stderr) => () => ({ status, stdout, stderr, error: undefined })
   check("a clean run is a success", runCli(cli, ["x"], { spawn: spawnResult(0, "fine\n", "") }).ok === true)
-  const noisy = runCli(cli, ["x"], { spawn: spawnResult(1, "", "npm warn deprecated a\nnpm ERR! 404 not found\n") })
-  check("a failed run is a failure", noisy.ok === false)
-  check("and it reports the last line, which is where the reason is", noisy.reason === "npm ERR! 404 not found", JSON.stringify(noisy.reason))
+  const refused = runCli(cli, ["x"], { spawn: spawnResult(1, "", "npm warn deprecated a\nnpm ERR! 404 not found\n") })
+  check("a failed run is a failure", refused.ok === false)
+  check("and it reports the last line, which is where the reason is", refused.reason === "npm ERR! 404 not found", JSON.stringify(refused.reason))
   const threw = runCli(cli, ["x"], { spawn: () => { throw new Error("ENOENT") } })
   check("a spawn that throws is a failure, not a crash", threw.ok === false && /ENOENT/.test(threw.reason))
 

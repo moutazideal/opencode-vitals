@@ -26,8 +26,13 @@ Uninstalling a registered install actually uninstalls it.
   running and will put its launcher entry back on its next tick.
 - **Installing reported a version it could not know.** The updater's exit code
   was read as proof of what was installed, which on this machine disagreed with
-  the result — the command reported a failure and the install was perfect. It
-  reports the error and stops there.
+  the result every single time: the command fetches the release correctly and
+  then exits non-zero with a stack trace out of its own bundle. So every install
+  announced a failure that had not happened, and the second attempt at fixing it
+  only made the message vaguer. Installing asks OpenCode which version it ended
+  up with, and reports that — which is a fact — instead of an exit code, which
+  is not. A machine left on an older release is now caught by the same question,
+  which is the failure the exit code would never have shown.
 
 ### Changed
 
@@ -39,7 +44,7 @@ Uninstalling a registered install actually uninstalls it.
 
 ### Measured
 
-- 371 checks, up from 363. The new ones describe the shape every install made
+- 377 checks, up from 363. The new ones describe the shape every install made
   this way has: no folder, and everything outside it still ours to remove.
 
 ## [0.1.9] - 2026-09-29

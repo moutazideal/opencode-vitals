@@ -652,9 +652,34 @@ function main(argv) {
 
   if (options.action === "uninstall") {
     const report = uninstall({ pluginsDir, force: options.force })
-    process.stdout.write(
-      report.action === "nothing-to-do" ? `nothing to remove in ${pluginsDir}\n` : `removed ${report.target}\n`,
-    )
+    // What was removed, and where it was. This used to report on the copy in the
+    // plugin directory and nothing else, which on a registered install — where
+    // there is no copy, by design — printed "nothing to remove" immediately
+    // after unregistering the package, deleting the readout and erasing the
+    // measurements. A person reading that cannot tell a working uninstall from a
+    // no-op, and goes looking for something that is still installed.
+    const did = []
+    if (report.registration?.skipped) did.push("was not in OpenCode's plugin list")
+    else if (report.registration?.ok) did.push("unregistered from OpenCode's plugin list")
+    if (report.action === "removed") did.push(`removed ${report.target}`)
+    if (report.readout?.renderer?.ok) did.push("removed the app interface copy and the launcher entry")
+    if (report.status?.ok && report.status.removed.length) did.push(`removed ${report.status.removed.length} measurement file(s)`)
+    if (report.legacy?.stopped) did.push("stopped the window an older version had left running")
+    process.stdout.write(did.length === 0 ? "nothing to remove\n" : `${did.join("\n")}\n`)
+
+    // The part that is neither obvious nor optional. A loaded plugin keeps
+    // working: it is already in memory, it still holds the server, and on its
+    // next tick it puts the launcher entry and the interface copy straight back.
+    // Without this restart the directory is gone, the entry is there pointing at
+    // a server that is serving nothing, and OpenCode will not open — which is
+    // the exact failure this plugin spent a release fixing, and the fastest way
+    // to walk into it by hand.
+    if (did.length > 0) {
+      process.stdout.write(
+        "\nRestart OpenCode now. Until you do, the copy still in memory keeps running and\n" +
+          "puts its launcher entry back, which leaves OpenCode unable to start.\n",
+      )
+    }
     return 0
   }
 

@@ -657,7 +657,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // The claim this makes instead is a claim about what has been written, so it
   // can only be kept honest by saying the unfinished part is unfinished.
   check("the page says Linux only rather than promising other platforms", /Linux only/.test(readme))
-  check("and the badge says so too", /platform-Linux%20only/.test(readme))
+  check("and the badge says so too, with no promise in it", /platform-Linux%20only/.test(readme) && !/coming%20soon/.test(readme))
+  check("the badge names the app as well as the platform", /app-OpenCode%20V2%20Desktop/.test(readme))
   const platforms = readme.slice(readme.indexOf("## Platform support"), readme.indexOf("## Options"))
   check("the platform table marks the other two as not written", /not written/.test(platforms), platforms.slice(0, 60))
   check("it does not call them expected anywhere", !/macOS[^\n]*expected|Windows[^\n]*expected/.test(platforms))

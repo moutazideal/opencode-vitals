@@ -77,6 +77,12 @@ again.
   preference, and finding either out by trying is how a stranger loses an
   afternoon.
 
+  The badge said "coming soon", which is a promise. The page names what is
+  missing and says the other two are not supported, so the badge says that too,
+  and gained a second one for the app — a reader who has OpenCode on their
+  machine already, in a terminal, is as likely to get this wrong as one on the
+  wrong operating system.
+
 - **"This plugin has no network code at all. No registry calls, no update pings."
   That stopped being true in 0.1.9.** A privacy claim one release behind the code
   is worse than no claim, because it is believed. The page now names the one host
@@ -107,7 +113,7 @@ again.
 
 ### Measured
 
-- 399 checks, up from 373. The removed feature took its checks with it, and what
+- 400 checks, up from 373. The removed feature took its checks with it, and what
   replaced them is the property that matters: a response carries the session and
   its totals and nothing else, and a payload that still arrives with a
   provisional figure is drawn without it. The rest are the page checking itself:

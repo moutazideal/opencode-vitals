@@ -9,7 +9,8 @@
   it is the desktop app and not the terminal that has to be running. macOS and Windows are not
   supported yet — see <a href="#platform-support">Platform support</a> for exactly what is missing.</p>
   <p>
-    <img alt="platform: Linux only for now" src="https://img.shields.io/badge/platform-Linux%20only%20%E2%80%94%20macOS%20%26%20Windows%20coming%20soon-d93f0b">
+    <img alt="platform: Linux only" src="https://img.shields.io/badge/platform-Linux%20only-d93f0b">
+    <img alt="app: OpenCode V2 Desktop, not the terminal client" src="https://img.shields.io/badge/app-OpenCode%20V2%20Desktop-2ea44f">
     <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-2ea44f">
     <img alt="network: the npm registry, for update checks only, opt out with --no-update" src="https://img.shields.io/badge/network-npm%20registry%2C%20updates%20only-2ea44f">
     <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-8b5cf6">

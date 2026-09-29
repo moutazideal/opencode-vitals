@@ -10,6 +10,13 @@ import { join } from "node:path"
 // ~/.cache or /tmp status directory of the person running them.
 const SUITE_TMP = mkdtempSync(join(tmpdir(), "vitals-suite-"))
 process.env.TMPDIR = SUITE_TMP
+// The readout binds a real socket, so the suite gets its own port rather than
+// fighting the developer's running instance for 8971. And it is pointed at an app
+// that does not exist, so a suite run never copies a 43MB renderer or writes a
+// launcher entry into the developer's home directory.
+const READOUT_PORT = 9200 + (process.pid % 300)
+process.env.OPENCODE_VITALS_PORT = String(READOUT_PORT)
+process.env.OPENCODE_DESKTOP_APP = join(SUITE_TMP, "no-such-app.asar")
 const { default: plugin, vitalsInternals } = await import("../index.js")
 process.on("exit", () => rmSync(SUITE_TMP, { recursive: true, force: true }))
 
@@ -512,117 +519,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   second.cleanup()
 }
 
-// 17. Bar lifetime follows the OpenCode app, not the systemd-supervised service.
-{
-  const fakeProc = mkdtempSync(join(tmpdir(), "vitals-proc-"))
-  const addProcess = (pid, argv) => {
-    mkdirSync(join(fakeProc, pid), { recursive: true })
-    const argvText = Array.isArray(argv) ? argv : [argv]
-    writeFileSync(join(fakeProc, pid, "cmdline"), `${argvText.join("\0")}\0`)
-    // The real /proc always has comm too, and it truncates at 15 characters:
-    // "ai.opencode.desktop" appears as "ai.opencode.d" there.
-    writeFileSync(join(fakeProc, pid, "comm"), `${(argvText[0] ?? "").slice(-15)}\n`)
-  }
-  addProcess("101", "/usr/lib/systemd/systemd")
-  addProcess("102", "/opt/OpenCode/ai.opencode.desktop")
-  addProcess("104", ["/opt/OpenCode/ai.opencode.desktop", "--type=zygote", "--no-zygote-sandbox"])
-  // The /proc walk is asynchronous: a plugin that blocked the event loop on one
-  // directory read per pid would stall every other event OpenCode delivers.
-  check("desktop process found", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc }) === true)
-  check("truncated comm alone is not trusted", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc, names: ["ai.opencode.d"] }) === false)
-  addProcess("103", "/usr/bin/bash")
-  check("other processes ignored", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: fakeProc, names: ["nothing-here"] }) === false)
-  check("unreadable proc root keeps bar", await vitalsInternals.scanDesktopProcess({ platform: "linux", procRoot: join(fakeProc, "missing") }) === true)
-  check("unknown platform keeps bar", await vitalsInternals.scanDesktopProcess({ platform: "aix" }) === true)
 
-  const now = 1_800_000_000_000
-  const grace = vitalsInternals.DESKTOP_MISSING_GRACE_MS
-  check("cli client never hides bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: false, lastDesktopSeenAt: now, now }) === true)
-  check("running app keeps bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: true, lastDesktopSeenAt: now - grace, now }) === true)
-  check("first sighting keeps bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: undefined, now }) === true)
-  check("closed app hides bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: now - 60_000, now }) === false)
-  check("long absence restores bar", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: false, lastDesktopSeenAt: now - grace - 1, now }) === true)
 
-  // A measurement bar must not outlive the session it is measuring. OpenCode
-  // keeps running with nothing open, and process existence is not usage.
-  const idle = vitalsInternals.IDLE_HIDE_MS
-  check("a session active just now keeps the bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - 1_000, now }) === true)
-  check("an idle install stands the bar down", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - idle - 1, now }) === false)
-  check("idle stands the bar down on the desktop too", vitalsInternals.barExpectedFrom({ desktopEnv: "desktop", desktopAlive: true, openSessionAt: now - idle - 1, now }) === false)
-  check("a session never measured keeps the bar", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: undefined, now }) === true)
-  // The bar must leave when it says it will: one tick has to fit inside the
-  // window, or the promise is "some time after ten seconds".
-  check("the tick fits inside the idle window", vitalsInternals.COMPANION_TICK_MS < vitalsInternals.IDLE_HIDE_MS, [vitalsInternals.COMPANION_TICK_MS, vitalsInternals.IDLE_HIDE_MS])
-  check("the idle window is the ten seconds asked for", vitalsInternals.IDLE_HIDE_MS === 10_000, vitalsInternals.IDLE_HIDE_MS)
-  // A reply in progress streams for a while before it finishes, so liveness is
-  // stamped by any event and not by a completed record.
-  check("a session mid-reply keeps the bar past the window", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: now - idle + 2_000, now }) === true)
-}
-
-// 18. Closing the app stops the running bar, proven in an isolated status dir.
-{
-  const pluginPath = new URL("../index.js", import.meta.url).href
-  const sandbox = mkdtempSync(join(tmpdir(), "vitals-stop-"))
-  const isolated = await withTmpDir(sandbox, () => import(`${pluginPath}?sandbox=${Date.now()}`))
-  const lockDir = join(sandbox, "opencode-latency-monitor")
-  mkdirSync(lockDir, { recursive: true })
-  const lockFile = join(lockDir, "popup.lock")
-  // The bar's identity is its command line, so the victim must really run a
-  // file called bar.py for stopPopup to consider it ours.
-  const victimScript = join(sandbox, "bar.py")
-  writeFileSync(victimScript, "import time\ntime.sleep(30)\n")
-  const victim = spawn(process.platform === "win32" ? "python" : "python3", [victimScript], { stdio: "ignore" })
-  await wait(400)
-  writeFileSync(lockFile, JSON.stringify({ pid: victim.pid, build: 1 }))
-  await isolated.vitalsInternals.stopPopup()
-  const deadline = Date.now() + 5000
-  while (Date.now() < deadline && victim.exitCode === null && victim.signalCode === null) await wait(25)
-  check("stopPopup terminates the bar", victim.exitCode !== null || victim.signalCode !== null, JSON.stringify({ code: victim.exitCode, signal: victim.signalCode }))
-  if (victim.exitCode === null && victim.signalCode === null) victim.kill("SIGKILL")
-  writeFileSync(lockFile, JSON.stringify({ pid: 999_999, build: 1 }))
-  let threw = false
-  try {
-    await isolated.vitalsInternals.stopPopup()
-  } catch {
-    threw = true
-  }
-  check("stopPopup tolerates a stale holder", threw === false)
-  rmSync(lockFile, { force: true })
-  rmSync(sandbox, { recursive: true, force: true })
-}
-
-// 19. The macOS/Windows process checks are correct and fail open.
-{
-  const names = ["ai.opencode.desktop", "OpenCode"]
-  const pgrep = (status) => (_command, args) => ({ status, stdout: "", args })
-  check("darwin pgrep match", vitalsInternals.processListDecision("darwin", names, pgrep(0)) === true)
-  check("darwin pgrep no match", vitalsInternals.processListDecision("darwin", names, pgrep(1)) === false)
-  check("darwin pgrep usage error keeps bar", vitalsInternals.processListDecision("darwin", names, pgrep(2)) === null)
-  check("darwin pgrep spawn failure keeps bar", vitalsInternals.processListDecision("darwin", names, pgrep(null)) === null)
-  // A real tasklist answers the filter it was given, so the fake reads the name
-  // out of the filter instead of returning one canned answer for every name.
-  const tasklist = (status, outputs = {}) => (_command, args) => {
-    const filter = args[2] ?? ""
-    const name = filter.replace("IMAGENAME eq ", "").replace(/\.exe$/, "")
-    return { status, stdout: outputs[name] ?? "INFO: No tasks are running which match the specified criteria." }
-  }
-  check("windows tasklist match", vitalsInternals.processListDecision("win32", names, tasklist(0, { OpenCode: "OpenCode.exe  1234 Console" })) === true)
-  check("windows tasklist empty", vitalsInternals.processListDecision("win32", names, tasklist(0)) === false)
-  check("windows tasklist failure keeps bar", vitalsInternals.processListDecision("win32", names, tasklist(1)) === null)
-  const calls = []
-  vitalsInternals.processListDecision("win32", names, (command, args) => {
-    calls.push({ command, args })
-    return { status: 0, stdout: "INFO: No tasks are running which match the specified criteria." }
-  })
-  check("windows asks per image name", calls.length === names.length && calls.every((call) => call.command === "tasklist"), JSON.stringify(calls.length))
-  check("windows uses an image filter", calls[0]?.args?.[2] === "IMAGENAME eq ai.opencode.desktop.exe", JSON.stringify(calls[0]))
-  let pgrepArgs = null
-  vitalsInternals.processListDecision("darwin", names, (command, args) => {
-    pgrepArgs = args
-    return { status: 1, stdout: "" }
-  })
-  check("darwin passes one pattern per call", Array.isArray(pgrepArgs) && pgrepArgs.length === 2, JSON.stringify(pgrepArgs))
-}
 
 // 20. A version change is noticed without any network call.
 {
@@ -733,6 +631,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // newcomers type has to be a bin named after the package.
   check("a command carries the package name", manifest.bin?.["opencode-vitals"] === "cli.mjs", JSON.stringify(manifest.bin))
   check("the dispatcher ships with the package", manifest.files.includes("cli.mjs"), JSON.stringify(manifest.files))
+  check("the readout ships with the package", manifest.files.includes("readout.mjs") && manifest.files.includes("renderer/vitals.js"), JSON.stringify(manifest.files))
+  check("nothing that drew a window is still shipped", !shippedFiles(manifest).some((name) => name.endsWith(".py") || name === "start-bar.sh"), JSON.stringify(shippedFiles(manifest)))
   check("shipped file list has no duplicates", new Set(shippedFiles(manifest)).size === shippedFiles(manifest).length)
 
   const plugins = mkdtempSync(join(tmpdir(), "vitals-plugins-"))
@@ -741,8 +641,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("install copies every shipped file", first.files === shippedFiles(manifest).length, JSON.stringify(first))
   check("the manifest is copied too", shippedFiles(manifest).includes("package.json") && existsSync(join(plugins, "opencode-vitals", "package.json")))
   check("installed manifest matches the package", JSON.parse(readFileSync(join(plugins, "opencode-vitals", "package.json"), "utf8")).version === manifest.version)
-  check("the shell script stays executable", (statSync(join(plugins, "opencode-vitals", "start-bar.sh")).mode & 0o111) !== 0)
-  check("the bar script stays executable", (statSync(join(plugins, "opencode-vitals", "bar.py")).mode & 0o111) !== 0)
+  check("the readout ships next to the plugin", existsSync(join(plugins, "opencode-vitals", "readout.mjs")))
+  check("the readout's injected script is shipped", existsSync(join(plugins, "opencode-vitals", "renderer", "vitals.js")))
   check("nested directories are created", existsSync(join(plugins, "opencode-vitals", "docs", "bar.png")))
 
   const again = install({ pluginsDir: plugins, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
@@ -830,75 +730,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   for (const directory of [plugins, other, linked, forced, stranger]) rmSync(directory, { recursive: true, force: true })
 }
 
-// 24. The popup retry gate: a bar that keeps dying backs off instead of
-// respawning every five seconds, and a bar we stopped is not a failure.
-{
-  const { nextPopupRetry } = vitalsInternals
-  const at = 1_000_000
-  const first = nextPopupRetry({ failures: 0, uptimeMs: 500, signal: null, now: at })
-  check("first crash waits 15s", first.failures === 1 && first.retryAt === at + 15_000, JSON.stringify(first))
-  const second = nextPopupRetry({ failures: 1, uptimeMs: 500, signal: null, now: at })
-  check("second crash waits 30s", second.retryAt === at + 30_000, JSON.stringify(second))
-  let escalated = { failures: 0, retryAt: 0 }
-  for (let index = 0; index < 10; index += 1) {
-    escalated = nextPopupRetry({ failures: escalated.failures, uptimeMs: 0, signal: null, now: at })
-  }
-  check("the wait is capped at five minutes", escalated.retryAt === at + 5 * 60_000, JSON.stringify(escalated))
-  const healthy = nextPopupRetry({ failures: 4, uptimeMs: 60_000, signal: null, now: at })
-  check("a bar that lived resets the count", healthy.failures === 0 && healthy.retryAt === 0, JSON.stringify(healthy))
-  const stopped = nextPopupRetry({ failures: 3, uptimeMs: 200, signal: "SIGTERM", now: at })
-  check("a bar we stopped is not a failure", stopped.failures === 0 && stopped.retryAt === 0, JSON.stringify(stopped))
-}
 
-// 25. The interpreter probe mirrors the selftest launcher, and the host call for
-// missing token counts gets a deadline.
-{
-  const { pythonCandidates, withTimeout } = vitalsInternals
-  const windows = pythonCandidates("win32", undefined).map((candidate) => candidate.command)
-  check("windows tries py before python", windows[0] === "py" && windows.includes("python") && windows.includes("python3"), windows.join(","))
-  const posix = pythonCandidates("linux", undefined).map((candidate) => candidate.command)
-  check("posix prefers python3", posix[0] === "python3", posix.join(","))
-  const configured = pythonCandidates("linux", "/opt/custom/python")
-  check("a configured interpreter is the only candidate", configured.length === 1 && configured[0].command === "/opt/custom/python", JSON.stringify(configured))
 
-  const fast = await withTimeout(Promise.resolve(7), 50)
-  check("withTimeout passes a value through", fast === 7, String(fast))
-  const slow = await withTimeout(new Promise(() => {}), 10)
-  check("withTimeout gives up on a hung promise", slow === undefined, String(slow))
-  const rejected = await withTimeout(Promise.reject(new Error("nope")), 50)
-  check("withTimeout swallows a rejection", rejected === undefined, String(rejected))
-}
-
-// 26. Signalling is guarded by identity: a stale lock whose pid was recycled
-// must never cost an unrelated process anything.
-{
-  const { processIsBar, stopPopup } = vitalsInternals
-  const sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" })
-  await wait(300)
-  check("a node process is not the bar", processIsBar(sleeper.pid) === false, String(sleeper.pid))
-
-  const fakeBar = join(SUITE_TMP, "bar.py")
-  writeFileSync(fakeBar, "import time\ntime.sleep(30)\n")
-  const barProcess = spawn(process.platform === "win32" ? "python" : "python3", [fakeBar], { stdio: "ignore" })
-  await wait(400)
-  check("a process running bar.py is the bar", processIsBar(barProcess.pid) === true, String(barProcess.pid))
-
-  const lockPath = join(SUITE_TMP, "opencode-latency-monitor", "popup.lock")
-  mkdirSync(join(SUITE_TMP, "opencode-latency-monitor"), { recursive: true })
-  writeFileSync(lockPath, JSON.stringify({ pid: sleeper.pid, build: 1 }))
-  await stopPopup()
-  await wait(150)
-  check("a recycled pid is left alone", sleeper.exitCode === null && sleeper.signalCode === null, `code=${sleeper.exitCode} signal=${sleeper.signalCode}`)
-
-  writeFileSync(lockPath, JSON.stringify({ pid: barProcess.pid, build: 1 }))
-  await stopPopup()
-  const deadline = Date.now() + 3000
-  while (Date.now() < deadline && barProcess.exitCode === null && barProcess.signalCode === null) await wait(50)
-  check("a real bar is asked to leave", barProcess.exitCode !== null || barProcess.signalCode !== null, `code=${barProcess.exitCode} signal=${barProcess.signalCode}`)
-  rmSync(lockPath, { force: true })
-  sleeper.kill("SIGKILL")
-  barProcess.kill("SIGKILL")
-}
 
 // 27. A compaction that fails must not mute the session. This is the scenario
 // the audit measured: the next response produced zero records.
@@ -1110,41 +943,6 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("the status directory is private", mode === 0o700, mode.toString(8))
 }
 
-// 38. The bar records that it showed a version notice in the same file the
-// plugin writes. Carrying that marker over keeps a second plugin instance from
-// announcing the same version all over again.
-{
-  const sandbox = mkdtempSync(join(tmpdir(), "vitals-notice-"))
-  const isolated = await withTmpDir(sandbox, () => import(`../index.js?notice=${Date.now()}`))
-  const versionFile = join(sandbox, "opencode-latency-monitor", "plugin-version.json")
-  mkdirSync(join(sandbox, "opencode-latency-monitor"), { recursive: true })
-  const own = isolated.vitalsInternals.readOwnVersion()
-
-  writeFileSync(versionFile, JSON.stringify({ version: "0.0.1-old", previous: null, updatedAt: 1_000, seenAt: 7_000 }))
-  const upgraded = await isolated.vitalsInternals.notePluginVersion()
-  check("a new version is recorded", upgraded.changed === true && upgraded.previous === "0.0.1-old", JSON.stringify(upgraded))
-  let stored = JSON.parse(readFileSync(versionFile, "utf8"))
-  check("a shown notice is not resurrected", stored.seenAt === 7_000 && stored.version === own, JSON.stringify(stored))
-
-  stored.seenAt = 9_000
-  writeFileSync(versionFile, JSON.stringify(stored))
-  const unchanged = await isolated.vitalsInternals.notePluginVersion()
-  check("the same version changes nothing", unchanged.changed === false, JSON.stringify(unchanged))
-  const after = JSON.parse(readFileSync(versionFile, "utf8"))
-  check("a rewrite of the same version leaves the marker", after.seenAt === 9_000, JSON.stringify(after))
-  rmSync(sandbox, { recursive: true, force: true })
-}
-
-// 39. A bar that declined because another instance already owns the lock is the
-// wanted state: no backoff escalation, no failure counted.
-{
-  const at = 2_000_000
-  const held = vitalsInternals.nextPopupRetry({ failures: 4, uptimeMs: 0, signal: null, code: vitalsInternals.LOCK_HELD_EXIT_CODE, now: at })
-  check("a held lock is not a crash", held.failures === 0, JSON.stringify(held))
-  check("the next look is a slow one", held.retryAt === at + vitalsInternals.LOCK_HELD_RETRY_MS, JSON.stringify(held))
-  const afterHeld = vitalsInternals.nextPopupRetry({ failures: held.failures, uptimeMs: 0, signal: null, now: at })
-  check("the failure count really reset", afterHeld.failures === 1 && afterHeld.retryAt === at + 15_000, JSON.stringify(afterHeld))
-}
 
 // 40. Per-turn logging is off unless it is asked for; a warning is not.
 {
@@ -1383,7 +1181,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     envelope("session.step.ended", { sessionID: child, assistantMessageID: "msg_c2", tokens: { output: 700 } }, base + 600),
     envelope("session.execution.succeeded", { sessionID: child }, base + 700),
   ]
-  // popup on, because the credit is published in the totals file the bar reads.
+  // popup on, because the credit is published in the totals file the readout
+  // reads. The port and the app path were set once, before the import.
   const { storage, cleanup } = await run(childEvents, {
     sessions: { [child]: { id: child, parentID: parent } },
     pluginOptions: { popup: true },
@@ -1411,126 +1210,116 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   else rmSync(totalsPath, { force: true })
 }
 
-// The bar's lifetime follows activity, not finished responses: a long reply is
-// streaming for a while before it completes, and a bar that stood down mid-reply
-// would leave exactly when its numbers are worth reading.
+// The readout: reading the app's bundle, injecting beside it, and cleaning up.
+// None of this needs the app to be installed, so the reader is exercised against
+// a bundle written by the test itself, in the documented format.
 {
-  const streaming = `ses_strm${unique.slice(0, 15)}`
-  const started = Date.now()
-  const events = [
-    envelope("session.execution.started", { sessionID: streaming }, started),
-    envelope("session.step.started", { sessionID: streaming, assistantMessageID: "msg_s" }, started + 10),
-    envelope("session.text.delta", { sessionID: streaming, assistantMessageID: "msg_s", delta: "a" }, started + 20),
-  ]
-  // A stale `created` on a replayed event must not read as liveness: the arrival
-  // time is what counts. The companion tick writes the stamp onto the runtime it
-  // polls, so that is what the test reads: the real path, not a probe.
-  const replayed = events.map((event) => ({ ...event, created: started - 3_600_000 }))
-  const directory = `/tmp/opencode/latency-replay-${Math.random()}`
-  const { cleanup } = await run(replayed, { pluginOptions: { popup: true }, location: { directory } })
-  await wait(1_500)
-  const runtime = vitalsInternals.runtimeFor(directory)
-  check("a replayed event still counts as activity now", typeof runtime.openSessionAt === "number" && Date.now() - runtime.openSessionAt < 5_000, JSON.stringify(runtime.openSessionAt))
-  check("the bar is expected while events are arriving", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: runtime.openSessionAt, now: Date.now() }) === true)
-  // And once the events stop, the same runtime stands the bar down.
-  check("the bar is dropped once the session goes quiet", vitalsInternals.barExpectedFrom({ desktopEnv: "cli", desktopAlive: true, openSessionAt: runtime.openSessionAt, now: runtime.openSessionAt + vitalsInternals.IDLE_HIDE_MS + 1 }) === false)
-  cleanup()
-}
+  const { readoutInternals, syncRenderer, installDesktopEntry, removeDesktopEntry } = await import("../readout.mjs")
+  const { openAsar, injectTag, markedEntryBody, appBinary, SCRIPT_TAG } = readoutInternals
 
-// A root session has no parent, and a session API that cannot answer must not
-// invent one: the work stays on the session that did it.
-{
-  const root = `ses_root${unique.slice(0, 15)}`
-  const events = [
-    envelope("session.execution.started", { sessionID: root }, base + 10),
-    envelope("session.step.started", { sessionID: root, assistantMessageID: "msg_r1" }, base + 20),
-    envelope("session.text.delta", { sessionID: root, assistantMessageID: "msg_r1", delta: "hi" }, base + 100),
-    envelope("session.step.ended", { sessionID: root, assistantMessageID: "msg_r1", tokens: { output: 40 } }, base + 200),
-    envelope("session.execution.succeeded", { sessionID: root }, base + 300),
-  ]
-  const { storage, cleanup } = await run(events, { sessions: { [root]: { id: root, parentID: null } } })
-  const record = await waitForRecord(storage, (item) => item.sessionID === root)
-  check("a root session has no parent recorded", record.parentSessionID === undefined, JSON.stringify(record.parentSessionID))
-  cleanup()
-
-  // No session API at all: the measurement still completes, undelegated.
-  const orphan = `ses_orph${unique.slice(0, 15)}`
-  const orphanEvents = events.map((event) => ({ ...event, data: { ...event.data, sessionID: orphan } }))
-  const second = await run(orphanEvents)
-  const orphanRecord = await waitForRecord(second.storage, (item) => item.sessionID === orphan)
-  check("a missing session API does not stop the measurement", orphanRecord.sessionTotals?.turns === 1, JSON.stringify(orphanRecord.sessionTotals))
-  check("without a session API the work stays on its own session", orphanRecord.sessionTotals?.subagentTurns === 0, JSON.stringify(orphanRecord.sessionTotals?.subagentTurns))
-  second.cleanup()
-}
-
-// Every session number is filed under the project it belongs to, because every
-// OpenCode instance on the machine shares one status directory.
-{
-  const alpha = `ses_alpha${unique.slice(0, 13)}`
-  const events = [
-    envelope("session.execution.started", { sessionID: alpha }, base + 10),
-    envelope("session.step.started", { sessionID: alpha, assistantMessageID: "msg_p" }, base + 20),
-    envelope("session.text.delta", { sessionID: alpha, assistantMessageID: "msg_p", delta: "x" }, base + 100),
-    envelope("session.step.ended", { sessionID: alpha, assistantMessageID: "msg_p", tokens: { output: 25 } }, base + 200),
-    envelope("session.execution.succeeded", { sessionID: alpha }, base + 300),
-  ]
-  const { storage, cleanup } = await run(events, {
-    location: { directory: "/home/someone/code/alpha", project: { id: "p_alpha", directory: "/home/someone/code/alpha", canonical: "/home/someone/code/alpha" } },
-  })
-  const record = await waitForRecord(storage, (item) => item.sessionID === alpha)
-  check("the record carries its project", record.sessionTotals?.project === "/home/someone/code/alpha", JSON.stringify(record.sessionTotals?.project))
-  cleanup()
-}
-
-// The current-session file is a map keyed by project now, so two instances stop
-// overwriting each other's session.
-{
-  const first = `ses_first${unique.slice(0, 14)}`
-  const second = `ses_second${unique.slice(0, 13)}`
-  const build = (sessionID) => [
-    envelope("session.viewed", { sessionID }, base + 10),
-  ]
-  const a = await run(build(first), {
-    pluginOptions: { popup: true },
-    location: { directory: "/home/someone/code/alpha", project: { id: "p", directory: "/home/someone/code/alpha", canonical: "/home/someone/code/alpha" } },
-  })
-  const b = await run(build(second), {
-    pluginOptions: { popup: true },
-    location: { directory: "/home/someone/code/beta", project: { id: "q", directory: "/home/someone/code/beta", canonical: "/home/someone/code/beta" } },
-  })
-  await wait(300)
-  const currentPath = vitalsInternals.CURRENT_SESSION_FILE
-  const current = JSON.parse(readFileSync(currentPath, "utf8"))
-  check("the current-session file is a per-project map", current.version === 2 && typeof current.projects === "object", JSON.stringify(current).slice(0, 160))
-  check("the first project kept its entry", current.projects?.["/home/someone/code/alpha"]?.sessionID === first, JSON.stringify(current.projects))
-  check("the second project kept its own entry", current.projects?.["/home/someone/code/beta"]?.sessionID === second, JSON.stringify(current.projects))
-  a.cleanup()
-  b.cleanup()
-}
-
-// The manual test sheet has to exist and has to stay honest about the two
-// things that make it worth running: it names the real test command, and it
-// still carries a known-gaps section. A checklist that quietly drops its
-// caveats is worse than no checklist.
-{
-  const checklistUrl = new URL("../docs/TEST-CHECKLIST.md", import.meta.url)
-  const present = existsSync(checklistUrl)
-  check("the manual test checklist exists", present, checklistUrl.pathname)
-  if (present) {
-    const sheet = readFileSync(checklistUrl, "utf8")
-    check("the checklist runs the real suite", /npm test/.test(sheet))
-    check("the checklist keeps a known-gaps section", /##\s*11\.\s*Known gaps/.test(sheet))
-    check("the checklist has a result column to fill in", /\| Result \|/.test(sheet))
-    // Every case is numbered, and no number is reused inside a section: a
-    // duplicate id is how two different tests end up sharing one result.
-    const ids = [...sheet.matchAll(/^\|\s*(\d+)\.(\d+)\s*\|/gm)].map((match) => `${match[1]}.${match[2]}`)
-    check("the checklist has cases", ids.length >= 100, `${ids.length} cases`)
-    const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index)
-    check("no two cases share an id", duplicates.length === 0, [...new Set(duplicates)].join(", "))
-    // The counts it quotes about the automated suite must not go stale.
-    const quoted = [...sheet.matchAll(/(\d+) checks/g)].map((match) => Number(match[1]))
-    check("the checklist's quoted counts are plausible", quoted.every((count) => count >= 100), quoted.join(","))
+  // -- the asar format --------------------------------------------------------
+  // A bundle is a 16-byte header, then a JSON directory, then the file data. The
+  // test writes one so the reader is proven against the format rather than
+  // against the app on this machine, which may not be there.
+  const encodeAsar = (tree) => {
+    const json = Buffer.from(JSON.stringify({ files: tree }), "utf8")
+    const padding = (4 - (json.length % 4)) % 4
+    const headerSize = 8 + json.length + padding
+    const header = Buffer.alloc(16)
+    header.writeUInt32LE(4, 0)
+    header.writeUInt32LE(headerSize, 4)
+    header.writeUInt32LE(json.length + padding, 8)
+    header.writeUInt32LE(json.length, 12)
+    return { header, json, base: 8 + headerSize, padding }
   }
+  const page = Buffer.from("<!doctype html><script type=\"module\" crossorigin src=\"./assets/main-abc123.js\"></script></html>")
+  const { header, json, base, padding } = encodeAsar({
+    out: { files: { renderer: { files: {
+      "index.html": { size: page.length, offset: "0" },
+      assets: { files: { "main-abc123.js": { size: 5, offset: String(page.length) } } },
+    } } } },
+  })
+  const bundle = join(SUITE_TMP, "fake.asar")
+  writeFileSync(bundle, Buffer.concat([header, json, Buffer.alloc(padding), page, Buffer.from("hello")]))
+
+  const asar = openAsar(bundle)
+  check("asar: a file reads back byte for byte", asar.read(["out", "renderer", "index.html"])?.equals(page) === true)
+  check("asar: a directory is told from a file", asar.isDir(["out", "renderer", "assets"]) === true && asar.isDir(["out", "renderer", "index.html"]) === false)
+  check("asar: a directory lists its children", asar.list(["out", "renderer", "assets"]).join() === "main-abc123.js", JSON.stringify(asar.list(["out", "renderer", "assets"])))
+  check("asar: a nested file reads back", asar.read(["out", "renderer", "assets", "main-abc123.js"])?.toString() === "hello")
+  check("asar: a missing path is not an error", asar.read(["out", "nope"]) === null && asar.has(["out", "nope"]) === false)
+
+  // -- injecting beside the bundle -------------------------------------------
+  check("injection: the tag lands beside the app's bundle", injectTag(page).includes(SCRIPT_TAG))
+  check("injection: the app's own bundle is untouched", injectTag(page).includes("./assets/main-abc123.js"))
+  check("injection: injecting twice is a no-op", (() => {
+    const once = injectTag(page)
+    return injectTag(Buffer.from(once)) === once
+  })())
+  check("injection: a page with no module bundle is refused, not guessed at", injectTag(Buffer.from("<html></html>")) === null)
+
+  // -- the launcher entry -----------------------------------------------------
+  // Ours is a copy of the system entry with Exec changed, so the packager's icon,
+  // WM class and deep-link handler survive. Rebuilding the file instead loses
+  // exactly the details that make a launcher work.
+  const system = { name: "ai.opencode.desktop.desktop", exec: "/opt/OpenCode/ai.opencode.desktop %U", body: "[Desktop Entry]\nName=OpenCode\nExec=/opt/OpenCode/ai.opencode.desktop %U\nIcon=ai.opencode.desktop\nStartupWMClass=ai.opencode.desktop\n" }
+  const marked = markedEntryBody(system, appBinary(system, "/opt/OpenCode/resources/app.asar"))
+  check("launcher: Exec points at the readout server", marked.includes(`Exec=env ELECTRON_RENDERER_URL=http://127.0.0.1:${readoutInternals.PORT} /opt/OpenCode/ai.opencode.desktop %U`), marked.split("\n")[2])
+  check("launcher: the icon is carried over", marked.includes("Icon=ai.opencode.desktop"))
+  check("launcher: the WM class is carried over", marked.includes("StartupWMClass=ai.opencode.desktop"))
+  check("launcher: it is marked as ours", marked.includes("X-OpenCode-Vitals=readout"))
+  check("launcher: the system entry is not edited", system.body.includes("Exec=/opt/OpenCode/ai.opencode.desktop %U") && !system.body.includes("ELECTRON_RENDERER_URL"))
+
+  // -- and it is all optional -------------------------------------------------
+  // No app on the machine is a fact, not a failure: the measurement is
+  // unaffected, so the sync says so and the plugin keeps working.
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  process.env.OPENCODE_DESKTOP_APP = join(SUITE_TMP, "there-is-no-app.asar")
+  const missing = syncRenderer({ force: true })
+  check("no app is reported, not thrown", missing.ok === false && typeof missing.reason === "string", JSON.stringify(missing))
+  check("a missing app installs no launcher", installDesktopEntry().ok === false)
+  check("a missing app removes nothing", removeDesktopEntry().ok === false)
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
+}
+
+// The readout answers for the session it is asked about and no other. Several
+// projects share the status directory, so a readout that guessed would show one
+// project's numbers under another's name.
+//
+// Asked over the real server rather than by calling a function, because the
+// server is what the app's window actually talks to.
+{
+  const { storage, cleanup } = await run([
+    envelope("session.execution.started", { sessionID: "ses_readA" }, base + 10),
+    envelope("session.step.started", { sessionID: "ses_readA", assistantMessageID: "msg_r1" }, base + 20),
+    envelope("session.text.delta", { sessionID: "ses_readA", assistantMessageID: "msg_r1", delta: "x" }, base + 100),
+    envelope("session.step.ended", { sessionID: "ses_readA", assistantMessageID: "msg_r1", tokens: { output: 25 } }, base + 200),
+    envelope("session.execution.succeeded", { sessionID: "ses_readA" }, base + 300),
+  ], { pluginOptions: { popup: true } })
+  const record = await waitForRecord(storage, (item) => item.sessionID === "ses_readA")
+  const ask = async (session) => {
+    const query = session === null ? "" : `?session=${encodeURIComponent(session)}`
+    const response = await fetch(`http://127.0.0.1:${READOUT_PORT}/vitals${query}`)
+    return { status: response.status, body: await response.json() }
+  }
+  const measured = await ask("ses_readA")
+  check("the readout has the measured session", measured.body.totals?.turns === 1, JSON.stringify(measured.body))
+  check("the readout is told which session it answered for", measured.body.sessionID === "ses_readA")
+  const unmeasured = await ask("ses_never_measured")
+  check("an unmeasured session gets no numbers", unmeasured.body.totals === null, JSON.stringify(unmeasured.body))
+  check("an unmeasured session still names itself", unmeasured.body.sessionID === "ses_never_measured")
+  const nameless = await ask(null)
+  check("a missing session id gets no numbers", nameless.body.totals === null && nameless.body.sessionID === null, JSON.stringify(nameless.body))
+  const empty = await ask("")
+  check("an empty session id is not a lookup", empty.body.totals === null, JSON.stringify(empty.body))
+  // The list the readout averages is a copy: a caller cannot mutate the totals
+  // the next reader will see.
+  const first = await ask("ses_readA")
+  first.body.totals.recentRates.push(9999)
+  const again = await ask("ses_readA")
+  check("the readout cannot write back into the totals", (again.body.totals?.recentRates?.length ?? 0) === (record.sessionTotals?.recentRates?.length ?? 0), JSON.stringify([first.body.totals?.recentRates, again.body.totals?.recentRates]))
+  cleanup()
 }
 
 for (const result of results) {

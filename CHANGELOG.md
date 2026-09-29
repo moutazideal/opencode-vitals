@@ -4,6 +4,67 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-09-29
+
+The window is gone. The numbers are drawn by OpenCode's own UI now.
+
+### Changed
+
+- **The readout lives inside OpenCode's composer.** The row that already holds
+  your agent, your model and the send button now also holds `9 turns · 35 steps ·
+  129 tok/s · 114 last10`. No window on top of your work, no taskbar entry, no
+  focus steal, and nothing to close by hand.
+- The readout is a copy of the app's renderer with **one script tag added beside
+  the app's own bundle**. The app's bundle is never rewritten, and the app is
+  pointed at the copy through the variable it already reads, so the ordinary
+  OpenCode icon starts it — no new launcher to learn, and nothing under the
+  install prefix is touched.
+- **One server, in the plugin's own process.** There is no child to start,
+  supervise, lock or stop. The server answers for the session the window says it
+  is showing, so switching project switches the numbers with it.
+- Installing sets up the renderer copy and the launcher entry; uninstalling takes
+  both away, so a removed plugin cannot leave the app starting differently.
+- `npx opencode-vitals selftest` now answers a different question: whether this
+  machine can show the readout at all. It checks the app is installed, that its
+  renderer can be read and copied, that the copy is current, and that the readout
+  is wired into it. It starts nothing and opens nothing.
+- The readout follows OpenCode's own theme, taking colour from the app's CSS
+  variables rather than hardcoding it, and lays out with `margin-inline-end` so
+  it is correct in a right-to-left locale.
+
+### Removed
+
+- **`bar.py`, `selftest.py` and `start-bar.sh`** — about 2,800 lines of Tkinter, a
+  singleton lock file, a respawn backoff ladder, a parent-pid liveness check and
+  four platform-specific ways of asking whether the app was still open. All of it
+  existed because the drawing happened outside the app. The package no longer
+  needs Python, and the test suite is one file.
+- The idle rules, the window-following, the resize and collapse, the position and
+  scale files, and the scale and window-hiding variables. They described a
+  window. Nothing about a row inside a composer needs them.
+- 142 bar checks, replaced by 24 that cover what is left — the asar reader
+  against the documented format, the injection, the launcher entry, and the
+  numbers the readout is actually served.
+
+### Fixed
+
+- **The readout could only ever know the first project.** The server belonged to
+  whichever plugin instance started it, so a project that loaded later found no
+  numbers at all. Session ids are unique across the machine, so the answer is now
+  whichever live instance knows the session, and an instance leaves the pool with
+  its cleanup.
+- **The server and the renderer copy were coupled.** A machine with no desktop app
+  — headless, TUI-only — had its numbers go nowhere, because the server only
+  started if the copy could be made. They are independent: the numbers are served
+  whether or not anything can draw them.
+- The listening socket no longer holds the event loop open, so importing this no
+  longer leaves a process hanging on exit.
+
+### Measured
+
+- 215 checks, down from 257. Fewer because a window is gone; the ones that remain
+  cover the measurement, the readout, and the failure modes of both.
+
 ## [0.1.7] - 2026-09-28
 
 The idle window is ten seconds, and it no longer mistakes a slow reply for an
@@ -416,6 +477,7 @@ The first public release.
   logic is covered by tests driven by a fake process list, but no macOS or
   Windows machine has run it yet.
 
+[0.1.8]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.8
 [0.1.7]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.7
 [0.1.6]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.6
 [0.1.5]: https://github.com/moutazideal/opencode-vitals/releases/tag/v0.1.5

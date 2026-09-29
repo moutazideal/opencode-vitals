@@ -39,14 +39,36 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)))
-const EXECUTABLE_SUFFIXES = [".sh", ".py"]
+// Uninstall has to clean up after the readout, which lives outside the plugin
+// directory. Imported here rather than at the top so a checkout without the
+// readout (an older copy mid-update) still installs.
+// The readout lives outside the plugin directory — a copy of the app's renderer
+// and a launcher entry — so install and uninstall have to reach it. Imported
+// lazily so a checkout without it (an older copy mid-update) still installs.
+let installReadout = () => ({ ok: false, reason: "readout module not present" })
+let removeReadout = () => ({ ok: false, reason: "readout module not present" })
+try {
+  const readout = await import("./readout.mjs")
+  installReadout = () => {
+    const synced = readout.syncRenderer()
+    if (!synced.ok) return { ok: false, reason: synced.reason }
+    return readout.installDesktopEntry()
+  }
+  if (typeof readout.removeReadout === "function") removeReadout = readout.removeReadout
+} catch {
+  // Keep the defaults: nothing to set up is a valid answer.
+}
+// The readout is drawn by OpenCode's own window, so nothing in the package needs
+// to be executable any more: the entry points are Node, and npm already shims
+// those on every platform.
+const EXECUTABLE_SUFFIXES = []
 const FALLBACK_FILES = [
   "index.js",
-  "bar.py",
+  "readout.mjs",
+  "renderer/vitals.js",
   "cli.mjs",
   "selftest.mjs",
-  "selftest.py",
-  "start-bar.sh",
+  "install.mjs",
   "README.md",
   "LICENSE",
   "docs/bar.png",
@@ -197,6 +219,11 @@ export function install({
     missing,
     version: manifest.version,
     replacedVersion: samePackage ? existing.version ?? null : null,
+    // Installing the plugin folder is only half of it: the readout lives in
+    // OpenCode's own window, which needs a copy of the app's renderer and a
+    // launcher that starts the app pointed at it. Reported, never assumed — a
+    // machine with no desktop app gets the measurement and a clear reason.
+    readout: installReadout(),
   }
 }
 
@@ -214,7 +241,12 @@ export function uninstall({ pluginsDir, packageRoot = PACKAGE_ROOT, name, force 
     throw new Error(`${target} does not look like ${manifest.name}; pass --force to remove it anyway.`)
   }
   rmSync(target, { recursive: true, force: true })
-  return { target, action: "removed", wasLink: existing.kind === "link" }
+  // The readout leaves a copy of the app's renderer and a launcher entry behind
+  // the plugin folder. Both are ours, both are outside the plugin directory, and
+  // both must go with it: leaving them means an uninstalled plugin still changes
+  // how the app starts.
+  const readout = removeReadout()
+  return { target, action: "removed", wasLink: existing.kind === "link", readout }
 }
 
 export function status({ pluginsDir, name = "opencode-vitals" } = {}) {

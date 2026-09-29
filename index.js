@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { removeDesktopEntry, serve, syncRenderer } from "./readout.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
 // The status directory and the OPENCODE_LATENCY_* variables keep the name this
@@ -19,24 +20,17 @@ const STATUS_DIR = join(tmpdir(), "opencode-latency-monitor")
 const STATUS_FILE = join(STATUS_DIR, "latest.json")
 const CURRENT_SESSION_FILE = join(STATUS_DIR, "current-session.json")
 const SESSION_TOTALS_FILE = join(STATUS_DIR, "session-totals.json")
-const BAR_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "bar.py")
 const RESPONSE_MARKER_TTL_MS = 10 * 60 * 1000
 const STORAGE_LOCK_TTL_MS = 5 * 1000
 const MAX_IGNORED_MESSAGE_IDS = 500
 const MAX_CLOSED_TURNS = 500
 const MAX_INBOX_TYPES = 200
 const MARKER_PRUNE_INTERVAL_MS = 60 * 1000
-// A bar that starts and dies at once (no tkinter, no display, crashed Tk) used to
-// be retried every five seconds forever. Consecutive short-lived exits back off
-// instead, and a bar that stays up resets the counter.
-const POPUP_BACKOFF_BASE_MS = 15 * 1000
-const POPUP_BACKOFF_MAX_MS = 5 * 60 * 1000
-const POPUP_SHORT_LIVED_MS = 10 * 1000
-// The bar exits with this code when another instance already owns the lock.
-// That is the correct outcome, not a crash, so it must not escalate the backoff
-// or fill the log with a bar that "failed".
-const LOCK_HELD_EXIT_CODE = 6
-const LOCK_HELD_RETRY_MS = 30 * 1000
+// The readout used to be a window this plugin spawned, retried, and supervised.
+// It is now served from inside this process, so there is no child to start, no
+// lock to lose and no backoff to get wrong. What is left is a sync of the app's
+// renderer copy, which is cheap and happens only when the app itself changes.
+const READOUT_SYNC_INTERVAL_MS = 10 * 60 * 1000
 const SESSION_CONTEXT_TIMEOUT_MS = 3000
 // A stream that stops for longer than this and then continues under the same
 // message id was interrupted (a reconnect, a resumed generation). The idle gap
@@ -117,330 +111,83 @@ function runtimeFor(location, project = null) {
   return runtime
 }
 
-function pidIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === "EPERM"
-  }
-}
-
-// A pid from the lock file is not proof that the process is the bar: pids are
-// recycled. Nothing is ever signalled unless the command line says bar.py, so a
-// stale lock can never kill an unrelated process. Windows is the exception, and
-// it is fail-open: the lock is ours and nothing cheaper can tell us more.
-function processIsBar(pid) {
-  if (!pidIsAlive(pid)) return false
-  if (process.platform === "linux") {
-    try {
-      return readFileSync(`/proc/${pid}/cmdline`, "utf8").includes("bar.py")
-    } catch {
-      return false
-    }
-  }
-  if (process.platform === "darwin") {
-    const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", timeout: 3000 })
-    return !result.error && (result.stdout ?? "").includes("bar.py")
-  }
-  return true
-}
-
-// The retry gate after a bar process ends. A signal we sent ourselves, a bar
-// that lived long enough to be useful, and a bar that declined because another
-// instance already owns the lock all reset the count; a short-lived exit
-// escalates 15s, 30s, 60s ... up to five minutes.
-function nextPopupRetry({ failures = 0, uptimeMs = 0, signal = null, code = null, now: at = Date.now() } = {}) {
-  if (signal === "SIGTERM" || signal === "SIGINT") return { failures: 0, retryAt: 0 }
-  if (uptimeMs >= POPUP_SHORT_LIVED_MS) return { failures: 0, retryAt: 0 }
-  if (code === LOCK_HELD_EXIT_CODE) {
-    // Somebody else is already drawing the bar. That is the wanted state, so
-    // the counter is reset and the next look is a slow, quiet one.
-    return { failures: 0, retryAt: at + LOCK_HELD_RETRY_MS }
-  }
-  const consecutive = failures + 1
-  const wait = Math.min(POPUP_BACKOFF_MAX_MS, POPUP_BACKOFF_BASE_MS * 2 ** (consecutive - 1))
-  return { failures: consecutive, retryAt: at + wait }
-}
-
+// A host call that does not answer must not hold a measurement open. The
+// deadline is the point: the numbers are already known, so a slow lookup should
+// cost nothing rather than delay the turn that produced them.
 function withTimeout(promise, milliseconds) {
-  let timer = null
-  // No unref here on purpose: the timer must be able to fire on its own, and it
-  // is cleared as soon as the race settles either way.
-  const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(undefined), milliseconds)
-  })
-  return Promise.race([Promise.resolve(promise).catch(() => undefined), timeout]).finally(() => {
-    if (timer) clearTimeout(timer)
-  })
-}
-
-// The bar needs a Python that can import tkinter. On Windows "python3" is often
-// the Store alias or missing entirely, so the candidates are probed instead of
-// trusted, in the same order the selftest launcher uses.
-function pythonCandidates(platform = process.platform, configured = process.env.OPENCODE_LATENCY_PYTHON) {
-  if (configured) return [{ command: configured, prefix: [] }]
-  if (platform === "win32") {
-    return [
-      { command: "py", prefix: ["-3"] },
-      { command: "python", prefix: [] },
-      { command: "python3", prefix: [] },
-    ]
-  }
-  return [
-    { command: "python3", prefix: [] },
-    { command: "python", prefix: [] },
-  ]
-}
-
-function probePython(candidate) {
-  const probe = spawnSync(candidate.command, [...candidate.prefix, "-c", "import tkinter"], { stdio: "ignore", timeout: 5000 })
-  return !probe.error && probe.status === 0
-}
-
-function resolvePython() {
-  if (companions.popupPython) return companions.popupPython
-  const candidates = pythonCandidates()
-  const working = candidates.find(probePython)
-  if (!working) {
-    console.error(
-      `[${PLUGIN_ID}] no Python with tkinter found (tried ${candidates.map((candidate) => candidate.command).join(", ")}); ` +
-        "run npx opencode-vitals-selftest to see what this machine needs",
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${milliseconds}ms`)), milliseconds)
+    timer.unref?.()
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
     )
-  }
-  companions.popupPython = working ?? candidates[0]
-  return companions.popupPython
-}
-
-// Asynchronous on purpose: this runs on the server's event loop, and a
-// readdirSync plus one readFileSync per pid is a stall nobody asked for. The
-// scan happens every few seconds for the whole life of the process.
-async function listLinuxProcesses(root, names) {
-  let entries
-  try {
-    entries = await readdir(root, { withFileTypes: true })
-  } catch {
-    return null
-  }
-  const wanted = new Set(names)
-  const found = []
-  await Promise.all(
-    entries.map(async (entry) => {
-      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) return
-      try {
-        // /proc/<pid>/comm is capped at 15 characters, so it truncates
-        // "ai.opencode.desktop" to "ai.opencode.d" and never matches. The
-        // cmdline file carries the whole argv.
-        const raw = await readFile(join(root, entry.name, "cmdline"), "utf8")
-        const argv0 = raw.split("\0")[0] ?? ""
-        const command = argv0.split(/[\\/]/).pop() ?? ""
-        if (wanted.has(command) || wanted.has(argv0)) found.push({ pid: Number(entry.name), command })
-      } catch {
-        // The process exited between listing and reading.
-      }
-    }),
-  )
-  return found
-}
-
-// Decides whether the app is running from a process-list tool, or null when the
-// tool itself failed. pgrep takes one pattern and exits 1 for "no match" and >1
-// for a usage error; tasklist needs /FI filters and reports "No tasks" when
-// nothing matched. Anything else is unknown, and unknown keeps the bar.
-function processListDecision(platform, names, probe) {
-  if (platform === "darwin") {
-    for (const name of names) {
-      const result = probe("pgrep", ["-x", name])
-      if (result.status === 0) return true
-      if (result.status !== 1) return null
-    }
-    return false
-  }
-  if (platform === "win32") {
-    for (const name of names) {
-      const result = probe("tasklist", ["/NH", "/FI", `IMAGENAME eq ${name}.exe`])
-      const output = result.stdout ?? ""
-      if (output.includes(name)) return true
-      if (result.status !== 0 || !/no tasks are running|info: no tasks/i.test(output)) return null
-    }
-    return false
-  }
-  return null
-}
-
-function runProcessListTool(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000 })
-  if (result.error) return { status: null, stdout: "" }
-  return { status: typeof result.status === "number" ? result.status : null, stdout: result.stdout ?? "" }
-}
-
-// Returns true when the app cannot be located, so an unknown platform keeps the
-// bar rather than hiding a measurement the user asked for.
-async function scanDesktopProcess({
-  platform = process.platform,
-  procRoot = "/proc",
-  names = DESKTOP_PROCESS_NAMES,
-} = {}) {
-  if (platform === "linux") {
-    const found = await listLinuxProcesses(procRoot, names)
-    return found === null ? true : found.length > 0
-  }
-  return processListDecision(platform, names, runProcessListTool) ?? true
-}
-
-function desktopAppAlive() {
-  // The process list only decides anything for the Desktop app. A CLI or TUI
-  // session can never be hidden by it, so the scan is not worth running — and
-  // on Linux it means walking /proc.
-  if (process.env.OPENCODE_CLIENT !== "desktop") return true
-  const cached = companions.desktopCheck
-  const stamp = Date.now()
-  if (cached && stamp - cached.at < DESKTOP_CHECK_TTL_MS) return cached.alive
-  companions.desktopCheck = { at: stamp, alive: true }
-  // Resolve outside the caller's turn: a scan that is still running must not
-  // make the caller guess, and the previous answer is good for a few seconds.
-  void scanDesktopProcess().then((alive) => {
-    companions.desktopCheck = { at: Date.now(), alive }
-  })
-  return true
-}
-
-// Whether the bar belongs on the screen. "OpenCode is installed" is not the
-// question: the process outlives the sessions that use it, so a bar keyed to
-// process existence stays up for a program nobody is looking at any more.
-function barExpectedFrom({ desktopEnv, desktopAlive, lastDesktopSeenAt, now, openSessionAt }) {
-  // A session has to be doing something. An idle OpenCode is a service with
-  // nothing to measure, and a bar over it is an overlay nobody asked for.
-  if (openSessionAt !== undefined && now - openSessionAt > IDLE_HIDE_MS) return false
-  if (desktopEnv !== "desktop") return true
-  if (desktopAlive) return true
-  if (lastDesktopSeenAt === undefined) return true
-  return now - lastDesktopSeenAt > DESKTOP_MISSING_GRACE_MS
-}
-
-function barExpected(runtime) {
-  const alive = desktopAppAlive()
-  if (alive && process.env.OPENCODE_CLIENT === "desktop") runtime.lastDesktopSeenAt = Date.now()
-  return barExpectedFrom({
-    desktopEnv: process.env.OPENCODE_CLIENT,
-    desktopAlive: alive,
-    lastDesktopSeenAt: runtime.lastDesktopSeenAt,
-    openSessionAt: runtime.openSessionAt,
-    now: Date.now(),
   })
 }
 
-async function stopPopup() {
-  let holder
-  try {
-    holder = JSON.parse(await readFile(BAR_LOCK, "utf8"))
-  } catch {
-    return
+// -- the in-app readout ------------------------------------------------------
+//
+// The numbers used to be drawn by a window this plugin spawned: a Python process
+// with a lock file, a backoff ladder, a script-change handshake and four
+// platform-specific ways of asking whether the app was still open. All of that
+// existed because the drawing happened outside the app.
+//
+// The readout is now served from this process. There is no child to supervise
+// and no lock to lose; what remains is keeping a copy of the app's renderer in
+// step with the app, and answering for the session the window says it is showing.
+let readoutServer = null
+
+// One server for the machine, many plugin instances behind it: OpenCode loads
+// this plugin once per project and they all share a process. The server cannot
+// belong to whichever instance happened to start it, or the projects that loaded
+// later would find no numbers at all. Session ids are unique across the machine,
+// so the answer is simply the one state that knows the session.
+const readoutStates = new Set()
+
+function totalsForSession(sessionID) {
+  for (const state of readoutStates) {
+    const found = state.totalsFor(sessionID)
+    if (found.totals) return found
   }
-  const pid = Number(holder?.pid)
-  if (!Number.isInteger(pid) || pid <= 0 || !pidIsAlive(pid)) return
-  // A recycled pid in a stale lock must never cost somebody their process.
-  if (!processIsBar(pid)) return
+  return { sessionID: typeof sessionID === "string" && sessionID ? sessionID : null, totals: null }
+}
+
+function syncReadout() {
   try {
-    process.kill(pid, "SIGTERM")
-  } catch {
-    // Already gone.
+    return syncRenderer()
+  } catch (error) {
+    return { ok: false, reason: String(error) }
   }
 }
 
-// The bar is current when its lock token matches the script revision on disk.
-async function companionIsCurrent(scriptPath) {
-  let holder
-  try {
-    const raw = await readFile(BAR_LOCK, "utf8")
-    const data = JSON.parse(raw)
-    holder = { pid: Number(data?.pid), build: Number(data?.build) }
-  } catch {
-    return false
-  }
-  if (!Number.isInteger(holder.pid) || holder.pid <= 0 || !Number.isFinite(holder.build)) return false
-  try {
-    const scriptStat = await stat(scriptPath)
-    if (Math.abs(scriptStat.mtimeMs - holder.build) > 1.5) return false
-  } catch {
-    return false
-  }
-  return pidIsAlive(holder.pid)
-}
-
-function spawnBarProcess(runtime, build) {
-  const python = resolvePython()
-  const child = spawn(python.command, [...python.prefix, BAR_SCRIPT], {
-    detached: true,
-    stdio: "ignore",
-    env: {
-      ...process.env,
-      OPENCODE_LATENCY_FILE: STATUS_FILE,
-      OPENCODE_LATENCY_CURRENT_FILE: CURRENT_SESSION_FILE,
-      OPENCODE_LATENCY_TOTALS_FILE: SESSION_TOTALS_FILE,
-      OPENCODE_LATENCY_PARENT_PID: String(process.pid),
-      // The bar is one window for one screen, and every project on the machine
-      // shares the files it reads. It is told which project spawned it so it
-      // never answers with another project's numbers.
-      ...(runtime.project ? { OPENCODE_LATENCY_PROJECT: runtime.project } : {}),
-    },
-  })
-  companions.popup = child
-  companions.popupBuild = build
-  companions.popupUnavailableUntil = 0
-  companions.popupStartedAt = Date.now()
-  runtime.popup = child
-  child.once("error", (error) => {
-    console.error(`[${PLUGIN_ID}] bar could not start: ${String(error)}`)
-    const retry = nextPopupRetry({ failures: companions.popupFailures })
-    companions.popupFailures = retry.failures
-    companions.popupUnavailableUntil = retry.retryAt
-    if (companions.popup === child) companions.popup = null
-  })
-  child.once("exit", (code, signal) => {
-    if (companions.popup === child) companions.popup = null
-    const uptimeMs = companions.popupStartedAt ? Date.now() - companions.popupStartedAt : 0
-    const retry = nextPopupRetry({ failures: companions.popupFailures, uptimeMs, signal, code })
-    companions.popupFailures = retry.failures
-    companions.popupUnavailableUntil = retry.retryAt
-    // Another bar already owns the screen: that is the wanted state, and it is
-    // not worth a line in the log on every check.
-    if (code === LOCK_HELD_EXIT_CODE) return
-    // Say why once the pattern repeats, so a machine that cannot draw the bar is
-    // not a silent five second loop. Deeper retries already backed off to minutes.
-    if (retry.failures >= 1 && retry.failures <= 4) {
-      const seconds = Math.max(1, Math.round((retry.retryAt - Date.now()) / 1000))
-      console.error(
-        `[${PLUGIN_ID}] bar exited after ${Math.round(uptimeMs)} ms ` +
-          `(code=${code ?? "none"}, signal=${signal ?? "none"}); retrying in ${seconds}s`,
-      )
-    }
-  })
-  child.unref()
-}
-
-function startPopup(runtime) {
-  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return
-  if (!barExpected(runtime)) return
-  if (companions.popupUnavailableUntil && Date.now() < companions.popupUnavailableUntil) return
-  companions.popupChain = companions.popupChain
-    .then(async () => {
-      if (await companionIsCurrent(BAR_SCRIPT)) return
-      let build = 0
-      try {
-        build = Math.round((await stat(BAR_SCRIPT)).mtimeMs)
-      } catch {
-        return
-      }
-      // The lock file only exists once the bar has started, so two locations
-      // polling in the same window would each spawn one. Our own live child for
-      // this exact revision is proof enough that no second bar is needed.
-      const child = companions.popup
-      if (child && child.exitCode === null && child.signalCode === null && companions.popupBuild === build) return
-      spawnBarProcess(runtime, build)
+function startReadout(state) {
+  // The two halves are independent and are treated as such. The server answers
+  // for the numbers whether or not a copy of the app's renderer can be made, and
+  // the copy can be made whether or not anything is listening yet. Gating the
+  // server on the copy meant that on a machine with no desktop app — a headless
+  // box, a TUI-only install — the numbers had nowhere to go at all.
+  if (!readoutServer) {
+    readoutServer = serve({
+      getSession: totalsForSession,
+      onError: (error) => {
+        readoutServer = null
+        state.warn(null, `readout server stopped: ${String(error)}`)
+      },
     })
-    .catch(() => {})
+  }
+  const synced = syncReadout()
+  return synced.ok ? { ok: true, ...synced } : { ok: false, served: true, reason: synced.reason }
+}
+
+function stopReadout() {
+  readoutServer?.close()
+  readoutServer = null
 }
 
 // The status directory sits in a temporary directory, which on Linux is
@@ -1418,6 +1165,28 @@ function createState(rawOptions, context = {}) {
     return lookup
   }
 
+  // What the readout should show for a session. The window asks for the session
+  // it is displaying, so this answers for exactly that session and no other: a
+  // session with no totals gets nulls rather than a neighbour's numbers, which
+  // is the mistake that made a fresh tab display someone else's turns.
+  function totalsFor(sessionID) {
+    const totals = typeof sessionID === "string" && sessionID ? sessionTotals.get(sessionID) : null
+    return {
+      sessionID: typeof sessionID === "string" && sessionID ? sessionID : null,
+      totals: totals
+        ? {
+            turns: totals.turns,
+            steps: totals.steps,
+            outputTokens: totals.outputTokens,
+            tokensPerSecond: totals.tokensPerSecond,
+            recentRates: [...(totals.recentRates ?? [])],
+            subagentSteps: totals.subagentSteps,
+            updatedAt: totals.updatedAt,
+          }
+        : null,
+    }
+  }
+
   function updateSessionTotals(sessionID, record) {
     let totals = sessionTotals.get(sessionID)
     if (!totals) {
@@ -1880,17 +1649,15 @@ function createState(rawOptions, context = {}) {
     setCurrentSessionId,
     refreshCurrentSession,
     noteActivityFor,
+    totalsFor,
     unknownEventTypes: summarizeUnknownEvents,
   }
 }
 
 // Exported for the plugin's own test suite; OpenCode only uses the default export.
 export const vitalsInternals = {
-  DESKTOP_PROCESS_NAMES,
-  DESKTOP_MISSING_GRACE_MS,
   RESPONSE_MARKER_TTL_MS,
-  LOCK_HELD_EXIT_CODE,
-  LOCK_HELD_RETRY_MS,
+  READOUT_SYNC_INTERVAL_MS,
   STREAM_GAP_LIMIT_MS,
   HANDLED_TYPES,
   IGNORED_TYPES,
@@ -1899,20 +1666,10 @@ export const vitalsInternals = {
   RECENT_RATE_COUNT,
   SUBAGENT_FIELDS,
   SESSION_LOOKUP_TIMEOUT_MS,
-  IDLE_HIDE_MS,
-  COMPANION_TICK_MS,
   SESSION_TOTALS_FILE,
   CURRENT_SESSION_FILE,
   projectKeyFor,
-  barExpectedFrom,
   runtimeFor,
-  scanDesktopProcess,
-  processListDecision,
-  barExpectedFrom,
-  stopPopup,
-  processIsBar,
-  nextPopupRetry,
-  pythonCandidates,
   withTimeout,
   readOwnVersion,
   notePluginVersion,
@@ -1944,20 +1701,27 @@ export default {
       if (markerTimer) clearInterval(markerTimer)
       if (runtime.markerTimer === markerTimer) runtime.markerTimer = null
       if (runtime.controller === controller) runtime.controller = null
+      // A reloaded instance must not keep answering for a session it no longer
+      // measures: the state leaves the pool with its cleanup.
+      readoutStates.delete(state)
     }
-    if (state.options.popup) startPopup(runtime)
-    // The bar is refreshed within seconds of a script change, the current session
-    // heartbeat lets the bar drop a stale session when the plugin is gone, and
-    // the bar itself leaves when the OpenCode app is closed.
+    // With the readout on, this process serves the numbers the app's own window
+    // asks for, and keeps the copy of the app's renderer in step with the app.
+    // Both are best-effort: if either fails the measurement is unaffected, so a
+    // failure is reported once and then left alone.
     if (state.options.popup) {
-      companionTimer = setInterval(() => {
-        state.noteActivityFor(runtime)
-        if (barExpected(runtime)) startPopup(runtime)
-        else void stopPopup()
-        state.refreshCurrentSession()
-      }, COMPANION_TICK_MS)
-      companionTimer.unref?.()
-      runtime.companionTimer = companionTimer
+      try {
+        readoutStates.add(state)
+        startReadout(state)
+        companionTimer = setInterval(() => {
+          const synced = syncReadout()
+          if (!synced.ok) state.warn(ctx, `readout: ${synced.reason}`)
+        }, READOUT_SYNC_INTERVAL_MS)
+        companionTimer.unref?.()
+        runtime.companionTimer = companionTimer
+      } catch (error) {
+        state.warn(ctx, `readout unavailable; measurement continues: ${String(error)}`)
+      }
     }
     state.setStorage(ctx.storage)
     await state.load()

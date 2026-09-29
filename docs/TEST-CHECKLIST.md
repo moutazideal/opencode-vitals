@@ -8,13 +8,16 @@ rather than about one function returning a value.
 is either a bug or a gap in the last section — the two are recorded differently
 on purpose, because a known gap is not a surprise later.
 
-**Two surfaces are covered.** The bar (the always-on-top window) and the in-app
-readout (the numbers inside OpenCode's own composer). Some rows apply to one,
-some to both. The column says which.
+**Two surfaces are covered.** The readout, which is drawn inside OpenCode's own
+window, and the measurement underneath it. Some rows apply to one, some to both.
+The column says which.
 
-- `[bar]` — the external window
-- `[ui]` — the in-app readout
+- `[ui]` — the readout inside OpenCode's composer
 - `[core]` — the measurement, independent of how it is displayed
+
+There is no external window any more. The bar, its process, its lock and its
+four platform-specific window checks are gone; §8 is the memory of why, not a
+sheet to run.
 
 ---
 
@@ -92,12 +95,12 @@ where a readout is most likely to show you the wrong session's numbers.
 
 | # | Case | Steps | Expected | Surface | Result |
 |---|---|---|---|---|---|
-| 4.1 | Switch session tab | click another tab | numbers follow within a second | ui, bar | |
-| 4.2 | Switch project | open a session in another project | numbers follow, never the old project's | ui, bar | |
-| 4.3 | New session, nothing measured | open a brand-new session | shows a dash, **not** another session's turns | ui, bar | |
-| 4.4 | Return to an old session | go back to a session from yesterday | its own totals, not the newest session's | ui, bar | |
-| 4.5 | Two projects, wrong project pinned | two projects open, check the readout | the readout never shows the other project | ui, bar | |
-| 4.6 | Session evicted from the file | open 50+ other sessions, return | dash, not a neighbour's numbers | ui, bar | |
+| 4.1 | Switch session tab | click another tab | numbers follow within a second | ui | |
+| 4.2 | Switch project | open a session in another project | numbers follow, never the old project's | ui | |
+| 4.3 | New session, nothing measured | open a brand-new session | shows a dash, **not** another session's turns | ui | |
+| 4.4 | Return to an old session | go back to a session from yesterday | its own totals, not the newest session's | ui | |
+| 4.5 | Two projects, wrong project pinned | two projects open, check the readout | the readout never shows the other project | ui | |
+| 4.6 | Session evicted from the file | open 50+ other sessions, return | dash, not a neighbour's numbers | ui | |
 | 4.7 | Deleted session still in a tab | delete the session, keep the tab | dash or graceful, never a stranger's numbers | ui | |
 | 4.8 | No session at all | the app's home screen, no session open | no readout, or a dash — never a number | ui | |
 | 4.9 | Two windows, different sessions | two OpenCode windows | each shows its own session | ui | |
@@ -127,13 +130,13 @@ The property that matters most: a number on screen is a number that happened.
 | # | Case | Input | Expected | Surface | Result |
 |---|---|---|---|---|---|
 | 6.1 | Zero tokens | a turn with no token counts | `null` rate, not `0` | core, ui | |
-| 6.2 | Four-digit rate | 4686 tok/s | prints short, `4.7k`, stays on the row | ui, bar | |
-| 6.3 | Very slow reply | 2 tok/s | readable, no layout break | ui, bar | |
-| 6.4 | Very large counts | 10M tokens | formats, does not overflow the row | ui, bar | |
+| 6.2 | Four-digit rate | 4686 tok/s | prints short, `4.7k`, stays on the row | ui | |
+| 6.3 | Very slow reply | 2 tok/s | readable, no layout break | ui | |
+| 6.4 | Very large counts | 10M tokens | formats, does not overflow the row | ui | |
 | 6.5 | Negative or zero stream time | a clock skew | ignored, never a negative rate | core | |
 | 6.6 | `NaN` / `Infinity` anywhere | forced | never reaches the record | core | |
 | 6.7 | Huge single response | 500k tokens | no truncation to a wrong number | core | |
-| 6.8 | Locale with comma decimals | `de_DE` | numbers still readable | ui, bar | |
+| 6.8 | Locale with comma decimals | `de_DE` | numbers still readable | ui | |
 
 ---
 
@@ -167,26 +170,21 @@ modes. A readout must never be able to break the editor.
 
 ---
 
-## 8. The bar's own lifecycle
+## 8. The readout's own lifecycle
 
-If the bar is kept at all. Every row here is about the window, not the numbers.
+The bar used to own a process, a lock file and a backoff ladder, and this
+section was where those were tested. All of that is gone, so there is nothing
+left here to test: the readout is drawn by the app's own window, which the app
+already looks after. What replaced the concern is the copy, and that is §7.
 
 | # | Case | Expected | Result |
 |---|---|---|---|
-| 8.1 | Close OpenCode | bar exits with it | |
-| 8.2 | OpenCode idle 10s+ | bar stands down | |
-| 8.3 | Reply still streaming | bar does **not** stand down | |
-| 8.4 | Replayed old events | do not read as a live session | |
-| 8.5 | Another instance owns the lock | exits quietly, no error spam | |
-| 8.6 | No display | no window, no crash loop | |
-| 8.7 | Bar killed | respawns, no 5-second loop | |
-| 8.8 | Python missing | says the machine cannot draw, once | |
-| 8.9 | Scale at both limits | clamps, layout intact | |
-| 8.10 | Collapse / restore | both states render | |
-| 8.11 | Window covered by another | steps aside, comes back | |
-| 8.12 | Monitor changed | follows to the new screen | |
-
----
+| 8.1 | Close OpenCode | nothing is left anywhere; the copy waits | |
+| 8.2 | Reopen OpenCode | the numbers are there again | |
+| 8.3 | OpenCode idle for a long time | the numbers stay correct, nothing to close by hand | |
+| 8.4 | Two projects open in two windows | each window shows its own session | |
+| 8.5 | The app updates itself | the app keeps working; the copy is behind until re-synced (11.3) | |
+| 8.6 | The readout is uninstalled | the app is exactly as installed: no copy, no launcher entry | |
 
 ## 9. Install, update, remove
 
@@ -209,10 +207,9 @@ If the bar is kept at all. Every row here is about the window, not the numbers.
 Run with `npm test`. These do not replace the sheet above; they cover the
 arithmetic and the guards, not how the app behaves.
 
-- Plugin: 257 checks — event accounting, totals, snapshot ranking, storage,
-  locking, subagent credit, the idle rules, and the README's own commands.
-- Bar: 142 checks — rendering, lock, session resolution, project scoping,
-  Desktop tab tracking, window following.
+- 215 checks in one suite: event accounting, totals, snapshot ranking, storage
+  locking, subagent credit, the asar reader, the injection, the launcher entry,
+  the numbers the readout is actually served, and the README's own commands.
 
 ---
 
@@ -242,6 +239,6 @@ they are decisions rather than surprises.
    to assume otherwise.
 7. **One readout per window.** Two windows show their own sessions correctly, but
    there is no cross-window coordination to deduplicate the numbers.
-8. **The bar and the readout can both be on.** Nothing stops both being visible
-   at once; they read the same source and agree, but it is two copies of one
-   number until the bar is retired or scoped to the TUI.
+8. **The readout needs the desktop app.** There is no TUI equivalent. On a
+   machine that only runs the terminal interface the numbers are still measured
+   and still written, and nothing shows them; that is a design limit, not a bug.

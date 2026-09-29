@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar.png" width="560" alt="The OpenCode Vitals bar: a dark always-on-top card with a teal speedometer dial on the left, the readings 34 turns, 210 steps, 318 tok/s and the last-ten reading 331 last10 across the middle, a resize grip in the bottom-right corner and a circular close button on the right">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar.png" width="900" alt="The OpenCode Vitals readout inside OpenCode's own composer: a dark prompt box with the placeholder Ask anything, / for commands, @ for context… and, on the row below it beside the agent, model and send controls, the readings 1 turns, 1 steps, 200 tok/s and 200 last10">
   <h1>OpenCode Vitals</h1>
   <p><strong>Stop guessing how fast your model is. Watch it.</strong></p>
   <p>A tiny always-on-top bar for OpenCode V2 that shows one honest line for the session you are
@@ -19,9 +19,9 @@
 </div>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/desktop.png" width="900" alt="The vitals bar floating over a real OpenCode session on a Linux desktop, reading 7 turns, 66 steps, 243 tok/s and the last-ten reading 311 last10 while a session waits behind it">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/desktop.png" width="900" alt="A real OpenCode window on a Linux desktop with the vitals readout in its composer, reading 1 turns, 1 steps, 200 tok/s and 200 last10, on the same row as the agent, model and send controls">
 </p>
-<p align="center"><em>The bar over a live session on a real desktop: 7 turns · 66 steps · 243 tok/s · 311 last10.</em></p>
+<p align="center"><em>A live session on a real desktop, with the numbers where you already look: 1 turn · 1 step · 200 tok/s · 200 last10.</em></p>
 
 ---
 
@@ -139,8 +139,10 @@ OpenCode Vitals puts that number on your screen, in the corner, all session long
 ## What you get
 
 ```
-◔  34 turns   210 steps   318 tok/s   · 331 last10 resp
++  Build ▾   Space Bunny Free ▾   Max ▾      1 turns  1 steps  200 tok/s  200 last10  [↑]
 ```
+
+On the row you already look at, inside the app.
 
 Every feature, in one place:
 
@@ -149,19 +151,14 @@ Every feature, in one place:
 | **Session average** | Turns, steps and average streaming tok/s for the session you are looking at, so one fast reply cannot flatter a long session. |
 | **Last ten responses** | `· N last10 resp` is the mean of the rates of the last ten completed **responses**, next to the session average. The session average is the whole session divided as one sum; this one moves as soon as a slow reply lands, which is what tells you the session just changed character. A response with no honest rate is skipped, not counted as a zero. It counts responses, not steps: the steps inside one reply are not ten separate answers, and averaging them would answer a question nobody asked. |
 | **Subagent work is counted** | A subagent runs as a session of its own, so its steps and tokens are added to the session that delegated the work. Its own streaming time is **not** — the session's tok/s stays a speed that session actually ran at, and the subagent's own rate stays on its own session. |
-| **Your project, your numbers** | Every OpenCode instance on the machine shares one status directory. The bar is told which project spawned it and shows only that project's sessions. A session with nothing measured yet says so instead of displaying another session's totals. |
-| **Always on top** | 450×54 pixels by default, undecorated, no taskbar entry, no focus steal, slightly transparent. |
-| **Any size you like** | Drag the bottom-right grip to resize, or hold **Ctrl** and use the wheel. Everything scales together — card, dial and text — the aspect ratio stays, and the size is remembered. **Right-click** resets it to 100%. |
-| **Move it anywhere** | Drag the body; the position is remembered. `OPENCODE_LATENCY_POSITION` picks the first corner instead. |
-| **Collapse** | Click the × and the bar shrinks to a small square that keeps showing tok/s; click the square to bring it back. The collapsed bar scales with the same size setting. |
-| **It follows your tab** | Switch sessions in the Desktop app and the bar switches with it (reads one row, `tabs.recent`, read-only). |
-| **It follows your attention** | Minimize the OpenCode window, switch to another program, or let a window cover OpenCode, and the bar steps aside; come back and it returns. Linux/X11, and fail-open: when it cannot tell, the bar stays. |
-| **It leaves when you do** | Close OpenCode and the bar exits with it; nothing is left on screen. It also stands down **10 seconds** after the last event from a session, so a service that is running but idle is not a bar you have to close by hand. Any event counts, not just a finished reply: a response that is still streaming keeps the bar up, because that is when its numbers are worth reading. |
-| **It tells you when it updated** | A new version announces itself once, in place of the numbers. |
-| **You can check what is running** | `npx opencode-vitals selftest` prints the loaded version, the previous one, and every fact the bar depends on. |
+| **Inside your app** | The numbers sit in OpenCode's own composer, in the row that already holds your agent and model. No window on top of your work, no taskbar entry, no focus steal. |
+| **It follows your tab** | Switch sessions in the app and the numbers switch with them. The readout asks for the session the window says it is showing, so switching project switches the numbers with it — it can never show another project's totals. |
+| **Nothing to clean up** | It is drawn by OpenCode's own window, so there is no second process, no lock, and nothing left on screen when you close the app. |
+| **It tells you when it updated** | A new version announces itself once in the log, so you can tell the copy you are reading about from the one that is running. |
+| **You can check what is running** | `npx opencode-vitals selftest` checks whether this machine can show the readout: the app is installed, its renderer can be copied, the copy is current, and the readout is wired into it. |
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar-mini.png" width="140" alt="The collapsed bar: a small square showing the session tokens per second under a TOK/S caption">
+  <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar-mini.png" width="640" alt="The readout close up: 1 turns, 1 steps, 200 tok/s and 200 last10, in the app's own muted and bright text colours">
 </p>
 
 ## The numbers, exactly
@@ -224,69 +221,50 @@ records, if you want to compute something else.
 
 | | |
 | --- | --- |
-| OpenCode | V2 (developed against 2.0.14, 2.0.16 and 2.0.18) |
+| OpenCode | V2 (developed against 2.0.14, 2.0.16, 2.0.18 and 2.0.19) |
 | Node | 18 or newer, for the plugin |
-| Python | 3.9+ **with tkinter**, for the bar |
+| Python | **not needed any more** |
 | Packages to install | **none** |
 
-tkinter ships with the official Python installers on Windows and macOS. On Debian/Ubuntu it is the
-small `python3-tk` package, usually already present on a desktop machine. On a headless server
-(SSH, CI, container) the bar is skipped and measurement still runs.
+Nothing has to be installed beyond this package. The readout is drawn by
+OpenCode's own window, so there is no interpreter to find, no display to check
+and nothing to build.
 
 ## Platform support
 
-Being straight about this, because "works everywhere" is usually a claim nobody checked:
+Being straight about this, because "works everywhere" is usually a claim nobody
+checked:
 
 | | Linux | macOS | Windows |
 | --- | --- | --- | --- |
 | Measurement core | **tested** | same code, no OS calls | same code, no OS calls |
-| Bar window | **tested** — GNOME/Mutter on X11: undecorated managed window, `_NET_WM_STATE_ABOVE`, drag, collapse, saved position | expected — Tk undecorated + topmost; best-effort against fullscreen apps | expected — Tk undecorated + topmost |
-| Follows the open tab | **tested** — `~/.config/ai.opencode.desktop/drafts.sqlite` | `~/Library/Application Support/…` (Electron convention) | `%APPDATA%\…` (Electron convention) |
-| Leaves with the app | **tested** — `/proc` scan | `pgrep` per name | `tasklist` per name |
-| Follows the window | **tested** — `_NET_WM_STATE` via xprop: the bar hides while the window is minimized and returns when it is restored | not implemented — the bar stays up | not implemented — the bar stays up |
-| Follows your attention | **tested** — `_NET_ACTIVE_WINDOW` for focus and `_NET_CLIENT_LIST_STACKING` plus window geometry for a covering window; fail-open when either cannot be read | not implemented — the bar stays up | not implemented — the bar stays up |
-| Resize (grip, Ctrl+wheel) | **tested** — works anywhere Tk draws | expected — same code | expected — same code |
+| Readout in the composer | **tested** — 2.0.19 on GNOME/Mutter, X11 | expected — the app's own UI | expected — the app's own UI |
+| Finds the installed app | **tested** — `/opt/OpenCode/resources/app.asar` | `/Applications/OpenCode.app/…` | `C:/Program Files/OpenCode/…` |
+| Launcher entry | **tested** — copied from the system `.desktop` | same convention | the Start-menu entry is not replaced |
 
-**Only the Linux column has run on real hardware.** The macOS and Windows paths are ordinary
-platform code with one rule that matters: when a check cannot run, the bar stays instead of
-disappearing. Run the selftest on your machine and you will know in ten seconds.
-
-## Does it work here? Ask the plugin
+**Only the Linux column has run on real hardware.** The app is packaged
+differently on every platform, so the paths it is looked for at are ordinary
+guesses — and a wrong guess is reported rather than worked around. Run the
+selftest on your machine and you will know in a few seconds:
 
 ```bash
 npx opencode-vitals selftest    # after installing from npm
 node selftest.mjs               # from a clone
-python3 selftest.py             # with Python directly
 ```
 
 ```
-opencode-vitals selftest — Linux 7.0.0-34-generic (linux)
-python 3.12.3 at /usr/bin/python3
+opencode-vitals 0.1.8
 
-ok   tkinter available
-ok   Tk runtime present — Tk 8.6, Tcl 8.6
-ok   a window system is reachable — DISPLAY=:0
-ok   a preferred font exists — Ubuntu
-ok   topmost window accepted — type=toolbar, topmost=1
-ok   window transparency accepted — -alpha 0.96
-ok   undecorated window type chosen — toolbar
-ok   Desktop state database found — /home/you/.config/ai.opencode.desktop/drafts.sqlite
-ok   open tab read from the database — ses_example0000000000000001
-ok   plugin installed on disk — /home/you/.config/opencode/plugins/opencode-vitals
-ok   plugin status file present — /tmp/opencode-latency-monitor/latest.json
-ok   session totals readable — 2 session(s)
-ok   a bar instance is running — pid 12345
-ok   plugin version recorded — running 0.1.5, package 0.1.5
+ok   the desktop app is installed  /opt/OpenCode/resources/app.asar
+ok   the app has a launcher entry  ai.opencode.desktop.desktop → /opt/OpenCode/ai.opencode.desktop %U
+ok   the launcher binary is where the entry says  /opt/OpenCode/ai.opencode.desktop
+ok   the app's renderer can be copied  fae2fe5ccfc6602c63fe25ddabae6351 (already current)
+ok   the readout renderer is in place  /home/you/.local/share/opencode-vitals/renderer
+ok   the readout is wired into the copied page
+ok   the page's assets came with it
 
-13/13 required checks passed, plus 1 note
-
-Ready: the bar is running on this machine.
+this machine can show the readout
 ```
-
-Every line is a measured fact, not an assumption. Only the checks of what this machine can do are
-required; runtime facts are reported as notes, so a plugin that is not installed yet is never
-reported as an untrustworthy machine — the command says so and points at the install command. A
-report from another operating system is worth sending with a bug.
 
 ## Options
 
@@ -308,23 +286,17 @@ report from another operating system is worth sending with a bug.
 }
 ```
 
-Environment variables, for the bar and for the curious:
+Environment variables, for the curious:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `OPENCODE_LATENCY_PYTHON` | detected | Interpreter used for the bar, instead of probing `python3`/`python`/`py`. |
-| `OPENCODE_LATENCY_POSITION` | `top-right` | Where the bar first appears: `top-right`, `top-left`, `bottom-right`, `bottom-left`. |
-| `OPENCODE_LATENCY_SCALE` | remembered | Size multiplier, `0.6`–`2.5`. Overrides the size the user dragged. |
-| `OPENCODE_LATENCY_HIDE_UNFOCUSED` | `1` | `0` keeps the bar visible when another program takes focus. |
-| `OPENCODE_LATENCY_HIDE_OCCLUDED` | `1` | `0` keeps the bar visible when another window covers OpenCode. |
-| `OPENCODE_LATENCY_DESKTOP_DB` | detected | Where the Desktop app keeps its state database. |
-| `OPENCODE_LATENCY_PROJECT` | set by the plugin | The project this bar serves. Set by the plugin; setting it by hand pins one project's numbers on the screen. |
+| `OPENCODE_VITALS_PORT` | `8971` | Port the readout is served on. Also written into the launcher entry, so the two always agree. |
+| `OPENCODE_VITALS_DIR` | `~/.local/share/opencode-vitals` | Where the copy of the app's renderer is kept. |
+| `OPENCODE_DESKTOP_APP` | detected | Point this at a specific `app.asar` when the app is somewhere unusual. An explicit value is the whole answer, not the first of several guesses. |
 
-The bar's own files (`OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_CURRENT_FILE`,
-`OPENCODE_LATENCY_TOTALS_FILE`, `OPENCODE_LATENCY_BEST_TOTALS_FILE`, `OPENCODE_LATENCY_POSITION_FILE`,
-`OPENCODE_LATENCY_SCALE_FILE`, `OPENCODE_LATENCY_VERSION_FILE`,
-`OPENCODE_LATENCY_LOCK_FILE`, `OPENCODE_LATENCY_PARENT_PID`) exist so the bar can be run against an
-isolated directory — the test suite uses them — and rarely need to be set by hand.
+The status files (`OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_CURRENT_FILE`,
+`OPENCODE_LATENCY_TOTALS_FILE`, `OPENCODE_LATENCY_VERSION_FILE`) exist so the measurement can be run
+against an isolated directory — the test suite uses them — and rarely need to be set by hand.
 
 ## Privacy
 
@@ -334,11 +306,11 @@ system temporary directory.
 
 - **Prompts and responses are never stored.** Only counts, timings, model and agent names, and
   session/message identifiers. The last-ten reading is a list of numbers and nothing else.
-- **One deliberate exception, and you can switch it off by moving the file:** to know which tab you
-  are looking at, the bar reads a single row (`tabs.recent`) from the Desktop app's own state
-  database, opened **read-only**. No draft text is read. Point `OPENCODE_LATENCY_DESKTOP_DB`
-  somewhere else, or let the file disappear, and the bar falls back to "the session you last typed
-  in".
+- **The readout asks the window which session it is showing,** and the answer comes from the app's
+  own titlebar. Nothing is read out of the app's state database any more, and no draft text is read
+  at any point.
+- **One file outside your home directory is read:** the app's own `app.asar`, to copy its renderer
+  out so the readout can be wired in. It is opened read-only and never written to.
 - **Nothing survives a restart except the numbers.** The status directory is plain files in
   `/tmp`-style temporary storage, and stale response markers are swept on a timer rather than
   waiting for your next message.
@@ -418,8 +390,8 @@ To install a copy of the checkout instead, drop the `--link`. To put it somewher
 ### Development
 
 ```bash
-npm test           # 250 plugin checks + 142 bar checks
-npm run selftest   # does the bar work on this machine?
+npm test           # 215 checks
+node selftest.mjs  # can this machine show the readout?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first
 ```
@@ -427,15 +399,12 @@ npm run prepublishOnly   # what publish runs first
 ```
 opencode-vitals/
 ├── index.js            the plugin: events, accounting, storage
-├── bar.py              the bar: Tkinter, standard library only
+├── readout.mjs         the readout: reads the app's bundle, serves the copy
+├── renderer/vitals.js  the readout as it appears in the composer
 ├── cli.mjs             npx opencode-vitals (install, selftest, status, uninstall)
 ├── install.mjs         the installer itself
-├── selftest.mjs        launcher that finds a Python with tkinter
-├── selftest.py         per-machine diagnosis
-├── start-bar.sh        run the bar by hand
-└── tests/
-    ├── vitals.test.mjs plugin logic
-    └── bar.test.py     bar behaviour, lock, Desktop tab tracking
+├── selftest.mjs        can this machine show the readout?
+└── tests/vitals.test.mjs
 ```
 
 Releases are cut by `.github/workflows/release.yml`: bump the version in `package.json`, add the

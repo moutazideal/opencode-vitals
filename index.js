@@ -62,7 +62,9 @@ const companions = globalThis[COMPANIONS_KEY] ?? (globalThis[COMPANIONS_KEY] = {
   desktopCheck: null,
 })
 
-const BAR_LOCK = join(STATUS_DIR, "popup.lock")
+// The bar's lock file used to live here. The readout is drawn by the app's own
+// window, so there is no second process to own anything; the name is kept out of
+// the code entirely and a stale lock from an older copy is simply ignored.
 const PLUGIN_VERSION_FILE = join(STATUS_DIR, "plugin-version.json")
 // How many recent responses the bar averages for its "last 10" reading. The
 // session average answers "is this session fast"; this answers "was the work I

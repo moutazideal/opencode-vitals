@@ -108,6 +108,18 @@ The window is gone. The numbers are drawn by OpenCode's own UI now.
   config file — so a plugin that set itself up only when its own installer ran would have been a
   plugin with no readout. Writing the entry is a no-op when it is already correct, so it does not
   touch the file's timestamp on every launch.
+- **A machine that had resolved an older release could never leave it.** OpenCode
+  checks unpinned packages for updates on startup and does not swap the installed
+  one — it loads the cached copy immediately and checks in the background. So a
+  machine that resolved this package while an older version was the latest kept
+  that version indefinitely. It was found by installing over a real 0.1.7 and
+  watching the bar's own files appear: `plugin add` registered it, and the
+  package that loaded was the cached 0.1.7, complete with `bar.py`. Installing now
+  fetches as well as registers, and reports the two outcomes apart, because
+  "installed" and "installed the right one" are different claims. A fresh machine
+  is unaffected either way, which is why only machines already on an old version
+  ever saw it — and why the version that could have fixed it was the version that
+  never ran.
 - Uninstalling and reinstalling left the plugin loading twice: once as the registered package and
   once as the copy the old installer had made. Installing removes the copy; `status` names both
   shapes if it finds them.
@@ -116,7 +128,7 @@ The window is gone. The numbers are drawn by OpenCode's own UI now.
 
 ### Measured
 
-- 339 checks, up from 257 — the renderer and the update path were the two parts with no tests at all. Fewer because a window is gone; the ones that remain
+- 351 checks, up from 257 — the renderer and the update path were the two parts with no tests at all. Fewer because a window is gone; the ones that remain
   cover the measurement, the readout, and the failure modes of both.
 
 ## [0.1.7] - 2026-09-28

@@ -224,6 +224,21 @@ export function runCli(cli, args, { timeout = 120_000, spawn: run = spawnSync } 
 // but it is invisible to `plugin list`, `plugin check` and `plugin update`, so
 // nobody — including OpenCode — can ever update it. That is the difference this
 // function exists to make.
+// Registering is one line in a config file. Making the registered package the
+// one that is actually current is a second command, and it is not optional.
+//
+// OpenCode checks unpinned packages for updates when the server starts, and
+// deliberately does not swap the installed one: it loads the cached copy
+// immediately and checks in the background. Which means a machine that resolved
+// this package while an older version was the latest keeps that older version
+// indefinitely — the check finds the new release and the cached copy stays. It is
+// not a transient state and not a race: a version before the update check existed
+// has no way to climb out of it, because the code that would do it is the code
+// that is not running.
+//
+// So this is two commands, and the second is the one that matters. A fresh
+// machine has nothing cached and gets the latest either way, which is why this
+// only shows up on the machines that are already broken.
 export function register({ cli = findOpenCodeCli(), name = "opencode-vitals", run = runCli } = {}) {
   if (!cli) {
     return {
@@ -232,9 +247,19 @@ export function register({ cli = findOpenCodeCli(), name = "opencode-vitals", ru
       command: `opencode plugin add ${name}`,
     }
   }
-  const result = run(cli, ["plugin", "add", name])
-  // `plugin add` prints this when the plugin is already registered, and exits 0.
-  return result.ok ? { ok: true, cli, output: result.output } : { ok: false, cli, reason: result.reason }
+  const added = run(cli, ["plugin", "add", name])
+  if (!added.ok) return { ok: false, cli, reason: added.reason }
+  const updated = run(cli, ["plugin", "update", name])
+  return {
+    ok: true,
+    cli,
+    output: added.output,
+    // Registration is what makes the plugin load; the update is what makes it the
+    // right one. They are reported apart because a machine that is stuck on an
+    // old version is a different problem from a machine that is not installed.
+    updated: updated.ok,
+    updateReason: updated.ok ? null : updated.reason,
+  }
 }
 
 export function unregister({ cli = findOpenCodeCli(), name = "opencode-vitals", run = runCli, env, home } = {}) {
@@ -654,7 +679,10 @@ function main(argv) {
       }
       process.stdout.write(
         `registered ${readManifest().name} with OpenCode${registered.cli ? ` (${registered.cli})` : ""}\n` +
-          "OpenCode downloads it in the background and checks it for updates on every start.\n" +
+          (registered.updated
+            ? "OpenCode downloads it in the background and checks it for updates on every start.\n"
+            : `OpenCode has it, but could not fetch the current release: ${registered.updateReason}\n` +
+              `  the installed copy is whatever was cached before; run: opencode plugin update ${readManifest().name}\n`) +
           "This plugin applies an update it finds and tells you to restart.\n",
       )
       if (options.update) setUpdateDisabledMarker(false)

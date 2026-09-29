@@ -1894,8 +1894,17 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   }
   write('{"plugins": ["opencode-vitals"]}')
   const added = register({ cli, name: "opencode-vitals", run: fake({ ok: true, output: "added" }) })
-  check("registering asks OpenCode to add the package", added.ok === true && calls.at(-1)[1] === "plugin" && calls.at(-1)[2] === "add" && calls.at(-1)[3] === "opencode-vitals", JSON.stringify(calls.at(-1)))
-  check("and it is registered without a version, so OpenCode will check it", true)
+  check("registering asks OpenCode to add the package", added.ok === true && calls.at(-2)[1] === "plugin" && calls.at(-2)[2] === "add" && calls.at(-2)[3] === "opencode-vitals", JSON.stringify(calls.at(-2)))
+  // The second command is the one that matters. OpenCode checks unpinned
+  // packages for updates and does not swap the installed one, so a machine that
+  // resolved this package while an older version was latest keeps it forever —
+  // and a version without an update check cannot get itself out.
+  check("and then asks it to fetch the current release", calls.at(-1)[2] === "update" && calls.at(-1)[3] === "opencode-vitals", JSON.stringify(calls.at(-1)))
+  check("which is reported separately from registering", added.updated === true && added.updateReason === null, JSON.stringify(added))
+
+  const staleAdd = register({ cli, name: "opencode-vitals", run: (binary, args) => (args[1] === "update" ? { ok: false, reason: "npm ERR! 500" } : { ok: true, output: "added" }) })
+  check("a registered-but-stale install is not reported as a success", staleAdd.ok === true && staleAdd.updated === false && /500/.test(staleAdd.updateReason ?? ""), JSON.stringify(staleAdd))
+  check("while a failure to register still is a failure", register({ cli, name: "opencode-vitals", run: fake({ ok: false, reason: "nope" }) }).ok === false)
 
   const noCli = register({ cli: null, name: "opencode-vitals" })
   check("with no CLI it says what to run instead", noCli.ok === false && /opencode plugin add opencode-vitals/.test(noCli.command ?? ""), JSON.stringify(noCli))

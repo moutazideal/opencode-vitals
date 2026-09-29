@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-09-29
+
+Uninstalling a registered install actually uninstalls it.
+
+### Fixed
+
+- **Uninstalling a package install left the launcher entry behind.** The removal
+  of the copy in the plugin directory ran first and returned early when there
+  was none — which there never is for a registered install, because the package
+  is in `node_modules` and no folder is ever written to the plugin directory. So
+  the launcher entry, the copy of the app's interface and every measurement
+  survived, and what was left pointing at a server that had stopped was the one
+  thing that stops OpenCode opening. Found by asking how to uninstall and
+  reinstall this by hand, which is how most people will ever do it.
+- **Uninstalling said "nothing to remove".** It reported on the copy in the
+  plugin directory and nothing else, so on every install made this way it
+  announced a no-op immediately after unregistering the package and deleting
+  things. It now lists what it removed, and says the one part that is neither
+  obvious nor optional: restart OpenCode, because a plugin that is loaded keeps
+  running and will put its launcher entry back on its next tick.
+- **Installing reported a version it could not know.** The updater's exit code
+  was read as proof of what was installed, which on this machine disagreed with
+  the result — the command reported a failure and the install was perfect. It
+  reports the error and stops there.
+
+### Changed
+
+- The directories a launcher entry is searched for are read when they are needed
+  rather than when the module is loaded, like every other environment lookup in
+  this file. A test whose environment changes after the import was searching the
+  directories the process started with, and "found nothing" is a reason for a
+  removal to be skipped rather than an error — so the case passed for free.
+
+### Measured
+
+- 371 checks, up from 363. The new ones describe the shape every install made
+  this way has: no folder, and everything outside it still ours to remove.
+
 ## [0.1.9] - 2026-09-29
 
 OpenCode is never allowed to stop opening. Everything else in this release is in

@@ -354,13 +354,22 @@ export function rendererReady() {
 // file instead would lose whatever the packager put in it — the icon, the WM
 // class, the deep-link handler — and those are exactly the details that make a
 // launcher work.
-const SYSTEM_ENTRY_DIRS = [
-  ...(process.env.XDG_DATA_DIRS ?? "/usr/local/share:/usr/share").split(":").map((dir) => join(dir, "applications")),
-  "/var/lib/flatpak/exports/share/applications",
-]
+// Read when it is needed, not when the module is loaded. findApp() already reads
+// the environment on every call, and this was the one place that did not — so a
+// process whose environment changed after it was imported, which is what a test
+// does, kept searching the directories it had at startup. That is a hidden
+// dependency on import order, and it is the reason a case here could pass for
+// free: the search found nothing, and "found nothing" is a reason for the removal
+// to be skipped rather than an error.
+function systemEntryDirs() {
+  return [
+    ...(process.env.XDG_DATA_DIRS ?? "/usr/local/share:/usr/share").split(":").map((dir) => join(dir, "applications")),
+    "/var/lib/flatpak/exports/share/applications",
+  ]
+}
 
 function readSystemEntry(app) {
-  for (const dir of SYSTEM_ENTRY_DIRS) {
+  for (const dir of systemEntryDirs()) {
     let names
     try {
       names = readdirSync(dir).filter((name) => name.endsWith(".desktop"))
@@ -432,12 +441,12 @@ export function installDesktopEntry() {
   }
 }
 
-export function removeDesktopEntry() {
+export function removeDesktopEntry({ dir } = {}) {
   const app = findApp()
   if (!app) return { ok: false, reason: "no app" }
   const systemEntry = readSystemEntry(app)
   if (!systemEntry) return { ok: false, reason: "no system launcher to mirror" }
-  const path = join(DESKTOP_DIR, systemEntry.name)
+  const path = join(dir ?? DESKTOP_DIR, systemEntry.name)
   try {
     // Only ever removes the entry we wrote, and only while it still carries our
     // marker: a file the user has since edited is theirs, not ours to delete.
@@ -454,14 +463,18 @@ export function removeDesktopEntry() {
 // Uninstall has to take both halves with it. Leaving either behind means a
 // removed plugin still changes how the app starts, which is the one thing an
 // uninstall must not do.
-export function removeReadout() {
-  const entry = removeDesktopEntry()
+// `workDir` is overridable for the same reason `removeStatus` takes a directory:
+// a test that cannot name the directory cannot check that it is gone, and the
+// directory it defaults to is the developer's own.
+export function removeReadout({ workDir, desktopDir } = {}) {
+  const target = workDir ?? WORK_DIR
+  const entry = removeDesktopEntry({ dir: desktopDir })
   const renderer = { ok: true, path: RENDERER_DIR }
   try {
     // The whole work directory, not just the renderer inside it: leaving an
     // empty shell behind means "uninstalled" still has a directory named after
     // this plugin sitting in the user's data path.
-    rmSync(WORK_DIR, { recursive: true, force: true })
+    rmSync(target, { recursive: true, force: true })
   } catch (error) {
     if (error?.code !== "ENOENT") renderer.ok = false, (renderer.reason = String(error))
   }
@@ -567,7 +580,7 @@ export const readoutInternals = {
   PORT,
   SCRIPT_TAG,
   MARKER,
-  SYSTEM_ENTRY_DIRS,
+  systemEntryDirs,
   appCandidates,
   findApp,
   inspect,

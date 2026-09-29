@@ -487,45 +487,50 @@ export function uninstall({
   // taken away, because until then the plugin loads twice.
   unregister: unregisterPlugin = unregister,
   skipUnregister = false,
+  // Where this plugin keeps things outside the plugin directory, so a test can
+  // name them instead of reaching into the developer's home.
+  workDir,
+  desktopDir,
+  statusDir,
 } = {}) {
   const manifest = readManifest(packageRoot)
   const directory = name ?? manifest.name
   const target = join(pluginsDir, directory)
   const existing = describeExisting(target)
   const registration = skipUnregister ? { ok: true, skipped: true } : unregisterPlugin({ name: manifest.name })
-  if (existing.kind === "absent") {
-    // Nothing in the plugin directory is not nothing installed: a registered
-    // package lives in node_modules and never appears here.
-    if (registration.ok) return { target, action: "nothing-to-do", registration }
-    return { target, action: "nothing-to-do", registration }
+  let action = "nothing-to-do"
+  if (existing.kind !== "absent") {
+    // Removing the folder that carries our name is not proof it is ours: compare
+    // the manifest, and refuse a stranger unless --force says otherwise.
+    const installed = readInstalledManifest(target)
+    const ours = existing.kind === "link" || (installed !== null && installed.name === manifest.name)
+    if (!ours && !force) {
+      throw new Error(`${target} does not look like ${manifest.name}; pass --force to remove it anyway.`)
+    }
+    rmSync(target, { recursive: true, force: true })
+    action = "removed"
   }
-  // Removing the folder that carries our name is not proof it is ours: compare
-  // the manifest, and refuse a stranger unless --force says otherwise.
-  const installed = readInstalledManifest(target)
-  const ours = existing.kind === "link" || (installed !== null && installed.name === manifest.name)
-  if (!ours && !force) {
-    throw new Error(`${target} does not look like ${manifest.name}; pass --force to remove it anyway.`)
-  }
-  rmSync(target, { recursive: true, force: true })
   // A version before 0.1.8 drew its numbers in a window it spawned, and that
   // window is a separate process: deleting its files does not stop it, so an
   // upgrade left the old bar on screen next to the readout. It is stopped here,
   // while we still know where it was and what it belonged to.
   const legacy = stopLegacyBar()
-  // The readout leaves a copy of the app's renderer and a launcher entry behind
-  // the plugin folder. Both are ours, both are outside the plugin directory, and
-  // both must go with it: leaving them means an uninstalled plugin still changes
-  // how the app starts.
-  const readout = removeReadout()
+  // The readout's copy of the app's renderer and its launcher entry, whether or
+  // not there was a copy in the plugin directory. This used to sit behind an
+  // early return for the "no copy" case — which is the normal case, because a
+  // registered package is not a folder in the plugin directory. So on every
+  // install made this way, uninstalling left the launcher entry pointing at a
+  // server that was no longer running, and an OpenCode that could not open.
+  const readout = removeReadout({ workDir, desktopDir })
   // The status directory holds this plugin's own measurements: per-session totals,
   // the version file and response markers. They live in a temporary directory,
   // but "uninstall" that leaves them is only half an uninstall — and the next
   // install would seed itself from the last one's numbers.
-  const status = removeStatus()
+  const status = removeStatus(statusDir ? { statusDir } : {})
   // And the opt-out, if it was asked for: a marker left behind after the thing it
   // was disabling is gone is a setting for a plugin that is not installed.
   const marker = setUpdateDisabledMarker(false)
-  return { target, action: "removed", wasLink: existing.kind === "link", legacy, readout, status, registration, marker }
+  return { target, action, wasLink: existing.kind === "link", legacy, readout, status, registration, marker }
 }
 
 // Only ever removes this package's files inside the status directory, and only
@@ -537,6 +542,7 @@ export function removeStatus({ statusDir = join(tmpdir(), "opencode-latency-moni
     "current-session.json",
     "latest.json",
     "plugin-version.json",
+    "update-check.json",
     "popup.lock",
   ]
   const removed = []

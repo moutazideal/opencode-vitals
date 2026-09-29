@@ -1436,6 +1436,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     "current-session.json",
     "latest.json",
     "plugin-version.json",
+    "update-check.json",
     "popup.lock",
     "response-abc.marker",
     "response-def.marker",
@@ -1455,9 +1456,10 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("uninstall removes the last record", !left.includes("latest.json"))
   check("uninstall removes the version file", !left.includes("plugin-version.json"))
   check("uninstall removes a legacy lock", !left.includes("popup.lock"))
+  check("uninstall removes the update latch", !left.includes("update-check.json"), JSON.stringify(left))
   check("uninstall removes the response markers", !left.filter((n) => n.endsWith(".marker")).length === true, JSON.stringify(left))
   check("uninstall leaves files it does not own", left.includes("something-else.json") && left.includes("notes.txt"), JSON.stringify(left))
-  check("uninstall reports what it removed", report.ok === true && report.removed.length === 7, JSON.stringify(report.removed?.length))
+  check("uninstall reports what it removed", report.ok === true && report.removed.length === 8, JSON.stringify(report.removed?.length))
   // And a directory that was never there is not an error.
   check("a missing status directory is fine", removeStatus({ statusDir: join(dir, "nope") }).ok === true)
   rmSync(dir, { recursive: true, force: true })
@@ -2224,6 +2226,78 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   else process.env.OPENCODE_VITALS_DIR = previousDir
   if (previousData === undefined) delete process.env.XDG_DATA_HOME
   else process.env.XDG_DATA_HOME = previousData
+  rmSync(home, { recursive: true, force: true })
+}
+
+// Uninstalling a registered install. There is no folder in the plugin directory
+// in this shape — the package is in node_modules — and everything this plugin
+// leaves outside that directory still has to go. It used to sit behind an early
+// return for the "no folder" case, so on every install made this way the launcher
+// entry survived, pointing at a server that had stopped: an OpenCode that could
+// not open, left behind by the act of removing the plugin.
+{
+  const { uninstall } = await import("../install.mjs")
+  const home = mkdtempSync(join(tmpdir(), "vitals-unreg-"))
+  const plugins = join(home, "plugins")
+  const work = join(home, "work")
+  const apps = join(home, "applications")
+  mkdirSync(plugins, { recursive: true })
+  mkdirSync(join(work, "renderer"), { recursive: true })
+  writeFileSync(join(work, "renderer", "index.html"), "<!doctype html>")
+  writeFileSync(join(work, "renderer", "vitals.js"), "//")
+  mkdirSync(apps, { recursive: true })
+  writeFileSync(join(apps, "ai.opencode.desktop.desktop"), "[Desktop Entry]\nX-OpenCode-Vitals=readout\n")
+
+  const statusDir = join(home, "opencode-latency-monitor")
+  mkdirSync(statusDir, { recursive: true })
+  writeFileSync(join(statusDir, "session-totals.json"), "{}")
+  writeFileSync(join(statusDir, "keep-me.txt"), "not ours")
+
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  const previousDir = process.env.OPENCODE_VITALS_DIR
+  const previousApps = process.env.XDG_DATA_HOME
+  const previousData = process.env.XDG_DATA_DIRS
+  const previousTmp = process.env.TMPDIR
+  process.env.OPENCODE_DESKTOP_APP = join(home, "App", "resources", "app.asar")
+  mkdirSync(join(home, "App", "resources"), { recursive: true })
+  writeFileSync(process.env.OPENCODE_DESKTOP_APP, "")
+  process.env.OPENCODE_VITALS_DIR = work
+  process.env.XDG_DATA_HOME = home
+  process.env.TMPDIR = home
+  // XDG_DATA_DIRS entries are searched with "applications" appended, so the entry
+  // itself goes in a subdirectory of the value, not in the value.
+  const systemApps = join(home, "system", "applications")
+  mkdirSync(systemApps, { recursive: true })
+  writeFileSync(join(systemApps, "ai.opencode.desktop.desktop"), ["[Desktop Entry]", `Exec=${join(home, "App", "ai.opencode.desktop")} %U`, ""].join("\n"))
+  process.env.XDG_DATA_DIRS = join(home, "system")
+
+  let unregistered = null
+  const report = uninstall({
+    pluginsDir: plugins,
+    unregister: () => { unregistered = true; return { ok: true } },
+    workDir: work,
+    desktopDir: apps,
+    statusDir,
+  })
+
+  check("the plugin directory is empty to begin with — this is the registered shape", readdirSync(plugins).length === 0, JSON.stringify(readdirSync(plugins)))
+  check("it still unregisters the package", unregistered === true)
+  check("it reports that no folder was there, which is not the same as nothing done", report.action === "nothing-to-do", JSON.stringify(report.action))
+  check("and it still removes the interface copy", !existsSync(work) && !existsSync(join(work, "renderer")))
+  check("and it still removes the launcher entry", !existsSync(join(apps, "ai.opencode.desktop.desktop")))
+  check("and it still removes the measurements", !existsSync(join(statusDir, "session-totals.json")), JSON.stringify(readdirSync(statusDir)))
+  check("while leaving files it does not own", existsSync(join(statusDir, "keep-me.txt")), JSON.stringify(readdirSync(statusDir)))
+
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
+  if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = previousDir
+  if (previousApps === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = previousApps
+  if (previousData === undefined) delete process.env.XDG_DATA_DIRS
+  else process.env.XDG_DATA_DIRS = previousData
+  if (previousTmp === undefined) delete process.env.TMPDIR
+  else process.env.TMPDIR = previousTmp
   rmSync(home, { recursive: true, force: true })
 }
 

@@ -681,8 +681,10 @@ function main(argv) {
         `registered ${readManifest().name} with OpenCode${registered.cli ? ` (${registered.cli})` : ""}\n` +
           (registered.updated
             ? "OpenCode downloads it in the background and checks it for updates on every start.\n"
-            : `OpenCode has it, but could not fetch the current release: ${registered.updateReason}\n` +
-              `  the installed copy is whatever was cached before; run: opencode plugin update ${readManifest().name}\n`) +
+            : `OpenCode has it, but its own updater reported a problem while fetching the current release:\n` +
+              `  ${registered.updateReason}\n` +
+              "  If you were on an older release it may still be the one loaded. This plugin tries\n" +
+              "  again on its next start and says so in the log if it cannot.\n") +
           "This plugin applies an update it finds and tells you to restart.\n",
       )
       if (options.update) setUpdateDisabledMarker(false)

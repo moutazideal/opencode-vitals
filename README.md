@@ -5,6 +5,9 @@
   <p>One honest line for the session you are working in, drawn inside OpenCode's own composer:
   turns, steps, the average streaming tokens per second, and the average of the last ten
   responses beside it.</p>
+  <p><strong>OpenCode V2 Desktop on Linux.</strong> The readout is drawn by the app's own window, so
+  it is the desktop app and not the terminal that has to be running. macOS and Windows are not
+  supported yet — see <a href="#platform-support">Platform support</a> for exactly what is missing.</p>
   <p>
     <img alt="platform: Linux only for now" src="https://img.shields.io/badge/platform-Linux%20only%20%E2%80%94%20macOS%20%26%20Windows%20coming%20soon-d93f0b">
     <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-2ea44f">
@@ -298,10 +301,24 @@ records, if you want to compute something else.
 
 | | |
 | --- | --- |
-| OpenCode | V2 (developed against 2.0.14, 2.0.16, 2.0.18 and 2.0.19) |
+| **Platform** | **Linux** |
+| **App** | **OpenCode V2 Desktop** — the terminal client is not enough |
+| OpenCode version | V2 (developed against 2.0.14, 2.0.16, 2.0.18 and 2.0.19) |
 | Node | 18 or newer, for the plugin |
 | Python | **not needed any more** |
 | Packages to install | **none** |
+
+**Two requirements, and both are load-bearing.**
+
+*Linux* is not a preference. The readout is drawn inside OpenCode's own window, and the app has to
+be started pointed at a copy of its interface. On Linux that means a `.desktop` entry, which is a
+Linux file format, and there is nothing to copy on macOS or Windows. Those two are not supported:
+see [Platform support](#platform-support).
+
+*OpenCode V2 Desktop* is the other one. The numbers are drawn in the desktop app's composer, so
+installing this and running only `opencode` in a terminal measures your sessions correctly and shows
+you nothing. There is no terminal version of the readout, and the plugin API for one is a different
+package with different capabilities.
 
 Nothing has to be installed beyond this package. The readout is drawn by
 OpenCode's own window, so there is no interpreter to find, no display to check

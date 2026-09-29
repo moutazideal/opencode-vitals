@@ -67,6 +67,16 @@ again.
   screenshots, the badge, and the platform table all agree, and a check keeps
   them agreeing.
 
+  The two requirements are now stated where a reader meets them before running
+  anything: in the summary at the top of the page, in the requirements table, and
+  in the install steps. **Linux**, because the launcher that starts OpenCode
+  pointed at the readout is a `.desktop` file, which is a Linux format.
+  **OpenCode V2 Desktop**, because the numbers are drawn in the desktop app's
+  composer — on the terminal client this measures your sessions correctly and
+  shows you nothing, and there is no terminal version of the readout. Neither is a
+  preference, and finding either out by trying is how a stranger loses an
+  afternoon.
+
 - **"This plugin has no network code at all. No registry calls, no update pings."
   That stopped being true in 0.1.9.** A privacy claim one release behind the code
   is worse than no claim, because it is believed. The page now names the one host
@@ -97,10 +107,13 @@ again.
 
 ### Measured
 
-- 392 checks, up from 373. The removed feature took its checks with it, and what
+- 399 checks, up from 373. The removed feature took its checks with it, and what
   replaced them is the property that matters: a response carries the session and
   its totals and nothing else, and a payload that still arrives with a
-  provisional figure is drawn without it.
+  provisional figure is drawn without it. The rest are the page checking itself:
+  that it names only variables the code reads, that it makes no network claim the
+  updater has invalidated, and that what it says about platforms, the badge and
+  the requirements table cannot drift apart.
 
 ## [0.1.10] - 2026-09-29
 

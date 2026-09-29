@@ -663,6 +663,19 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("it does not call them expected anywhere", !/macOS[^\n]*expected|Windows[^\n]*expected/.test(platforms))
   check("and it says why, in the mechanism rather than a promise", /ELECTRON_RENDERER_URL/.test(platforms) && /\.desktop/.test(platforms))
   check("and it is honest that they will measure without showing", /measure your sessions correctly and show you nothing/.test(platforms))
+  // Two requirements, and the wrong one wastes a stranger's afternoon: this draws
+  // inside OpenCode's desktop window, so the terminal client is not enough, and
+  // the launcher it needs is a Linux file format. Both have to be findable before
+  // the first command, not discovered after it.
+  const head = readme.slice(0, readme.indexOf("</div>"))
+  check("the summary says which platform", /Linux/.test(head) && /macOS and Windows are not\s+supported/.test(head.replace(/\s+/g, " ")), head.slice(0, 60))
+  check("the summary says which app, and that the terminal is not enough", /OpenCode V2 Desktop/.test(head) && /terminal client is not enough|desktop app and not the terminal/.test(head.replace(/\s+/g, " ")))
+  check("the badge agrees with the summary", /platform-Linux%20only/.test(readme))
+  const requirements = readme.slice(readme.indexOf("## Requirements"), readme.indexOf("## Platform support"))
+  check("the requirements table leads with platform and app", /\| \*\*Platform\*\* \| \*\*Linux\*\*/.test(requirements) && /\| \*\*App\*\* \| \*\*OpenCode V2 Desktop\*\*/.test(requirements))
+  check("it explains that Linux is not a preference", /not a preference/.test(requirements))
+  check("it explains the terminal is not enough, and why", /running only `opencode` in a terminal measures your sessions correctly and shows\s+you nothing/.test(requirements.replace(/\s+/g, " ")))
+  check("and the install steps carry the warning too", /Linux only, for now/.test(readme))
   // The window it draws in has a launcher entry pointed at it. Saying so is part
   // of the same claim: what this plugin changes on your machine.
   check("privacy says the launcher entry it writes and when", /launcher entry is written/.test(privacy) && /Uninstalling removes it/.test(privacy))

@@ -26,6 +26,7 @@
     "selftest.mjs",
     "docs/bar.png",
     "docs/bar-mini.png",
+    "docs/desktop.png",
     "README.md",
     "LICENSE"
   ],
@@ -58,8 +59,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "opencode-vitals": "^0.1.7"
   }
 }

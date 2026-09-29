@@ -1353,6 +1353,67 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   rmSync(dir, { recursive: true, force: true })
 }
 
+// A reply in progress is the moment the numbers are worth watching, so the turn
+// is published while it grows. These cases pin that it happens, that it is
+// marked provisional, and — the trap — that it never leaks into the totals.
+{
+  const { storage, cleanup } = await run([
+    envelope("session.viewed", { sessionID: "ses_inflight" }, base + 10),
+    envelope("session.execution.started", { sessionID: "ses_inflight" }, base + 20),
+    envelope("session.step.started", { sessionID: "ses_inflight", assistantMessageID: "msg_live" }, base + 30),
+    envelope("session.text.delta", { sessionID: "ses_inflight", assistantMessageID: "msg_live", delta: "x".repeat(400) }, base + 1200),
+    envelope("session.text.delta", { sessionID: "ses_inflight", assistantMessageID: "msg_live", delta: "y".repeat(200) }, base + 2200),
+    // no execution.succeeded: the reply is deliberately still in flight
+  ], { pluginOptions: { popup: true } })
+  await waitForRecord(storage, (item) => item.sessionID === "ses_inflight").catch(() => null)
+  await wait(1600)
+  const ask = async (session) => (await fetch(`http://127.0.0.1:${READOUT_PORT}/vitals?session=${session}`)).json()
+
+  const inFlight = await ask("ses_inflight")
+  check("a reply in flight is published", inFlight.live !== null && inFlight.live.live === true, JSON.stringify(inFlight.live))
+  check("it is marked live so it is never read as settled", inFlight.live?.live === true)
+  check("it carries its characters so far", inFlight.live?.characterCount === 600, JSON.stringify(inFlight.live?.characterCount))
+  check("it carries a rate over the real streaming span", typeof inFlight.live?.charactersPerSecond === "number" && inFlight.live.charactersPerSecond > 0, JSON.stringify(inFlight.live?.charactersPerSecond))
+  // The trap: a provisional figure folded into the session's own numbers would
+  // make them mean two things at once. A turn that has not ended is not counted.
+  check("an unfinished reply is not in the totals", inFlight.totals === null, JSON.stringify(inFlight.totals))
+  check("an unfinished reply does not add a turn", inFlight.totals?.turns === undefined || inFlight.totals.turns === 0)
+
+  // A session with no reply in flight reports no live number, not a stale one.
+  const idle = await ask("ses_nothing_here")
+  check("a session with no live reply reports none", idle.live === null, JSON.stringify(idle.live))
+  cleanup()
+}
+
+// The readout reports whether it found the composer, and the only place that
+// report can land is the server. Before it had a handler the request fell through
+// to the asset lookup and was answered with the whole index.html, once a second
+// — the diagnostic for "the app renamed a slot" went nowhere and cost a page
+// fetch per tick.
+{
+  const { serve, readoutInternals } = await import("../readout.mjs")
+  const statuses = []
+  const port = readoutInternals.PORT + 1
+  const server = serve({
+    getSession: () => ({ sessionID: null, totals: null }),
+    onStatus: (entry) => statuses.push(entry),
+    port,
+  })
+  // listen() is async and the plugin's own server already holds the default
+  // port, so wait for this one rather than assuming it.
+  for (let attempt = 0; attempt < 40 && !server.listening; attempt += 1) await wait(25)
+  check("the readout server accepts connections", server.listening === true)
+  const report = await fetch(`http://127.0.0.1:${port}/__vitals-status?placed=false&detail=composer-actions%20absent`)
+  check("the status report is answered, not served as a page", report.status === 204, String(report.status))
+  check("it does not return a document", !(await report.text()).includes("<!doctype"))
+  check("it reaches the caller", statuses.length === 1 && statuses[0].placed === false, JSON.stringify(statuses))
+  check("it carries the reason", /composer-actions/.test(statuses[0]?.detail ?? ""), JSON.stringify(statuses[0]))
+  // And an asset that is genuinely missing is still a 404, not this branch.
+  const missing = await fetch(`http://127.0.0.1:${port}/assets/nope-abc123.js`)
+  check("a missing asset is still a 404", missing.status === 404, String(missing.status))
+  await new Promise((resolve) => server.close(resolve))
+}
+
 for (const result of results) {
   console.log(`${result.ok ? "ok  " : "FAIL"} ${result.name}${result.detail ? ` ${result.detail}` : ""}`)
 }

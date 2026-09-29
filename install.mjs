@@ -87,6 +87,8 @@ export function stopLegacyBar({ statusDir = join(tmpdir(), "opencode-latency-mon
   }
   return { stopped: true, pid }
 }
+
+// The readout lives outside the plugin directory — a copy of the app's renderer
 // and a launcher entry — so install and uninstall have to reach it. Imported
 // lazily so a checkout without it (an older copy mid-update) still installs.
 let installReadout = () => ({ ok: false, reason: "readout module not present" })
@@ -117,6 +119,7 @@ const FALLBACK_FILES = [
   "LICENSE",
   "docs/bar.png",
   "docs/bar-mini.png",
+  "docs/desktop.png",
 ]
 
 export function readManifest(packageRoot = PACKAGE_ROOT) {
@@ -384,7 +387,7 @@ function main(argv) {
   if (report.missing?.length) {
     process.stdout.write(`  not in this package, skipped: ${report.missing.join(", ")}\n`)
   }
-  process.stdout.write("\nRestart OpenCode. The bar appears within a few seconds.\n")
+  process.stdout.write("\nRestart OpenCode. The numbers appear in the composer.\n")
   return 0
 }
 

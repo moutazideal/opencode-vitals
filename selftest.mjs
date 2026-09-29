@@ -41,9 +41,9 @@ console.log(`opencode-vitals ${version}\n`)
 
 const app = readoutInternals.findApp()
 if (!app) {
-  console.log("  No OpenCode desktop app found, so there is no window to draw in.")
-  console.log("  The numbers are still measured and still written; nothing will show them here.")
-  console.log(`  Looked in: ${readoutInternals.SYSTEM_ENTRY_DIRS.join(", ")}`)
+  console.log("  No OpenCode desktop app found, so there is nothing to draw in.")
+  console.log("  The numbers are still measured; nothing will show them here.")
+  console.log(`  Looked for the app bundle in: ${readoutInternals.appCandidates().join(", ")}`)
   process.exit(0)
 }
 say(true, "the desktop app is installed", app)

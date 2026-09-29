@@ -342,7 +342,10 @@ export function removeReadout() {
 
 // Serves the copied renderer and the numbers. It runs inside the plugin host, so
 // there is no second process to start, stop, supervise or leave behind.
-export function serve({ getSession, onListen, onError } = {}) {
+// `port` defaults to the one the launcher entry names, which is what the app is
+// pointed at. It is overridable so a test can bind a second server beside the
+// real one instead of fighting it for the port.
+export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
   const fileExists = (candidate) => {
     try {
       return statSync(candidate).isFile()
@@ -354,6 +357,18 @@ export function serve({ getSession, onListen, onError } = {}) {
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost")
     const { pathname } = url
+
+    // The injected script reports whether it found the composer. It is the only
+    // signal for the failure that matters most — the app renaming a slot, and
+    // the readout quietly vanishing with no error anywhere — so it has to land
+    // somewhere. Without this the request fell through to the asset lookup and
+    // was answered with the whole index.html, once a second, forever.
+    if (pathname === "/__vitals-status") {
+      const { placed, detail } = Object.fromEntries(url.searchParams)
+      onStatus?.({ placed: placed === "true", detail: detail ?? "" })
+      response.writeHead(204).end()
+      return
+    }
 
     if (pathname === "/vitals") {
       let payload
@@ -393,7 +408,7 @@ export function serve({ getSession, onListen, onError } = {}) {
   })
 
   server.on("error", (error) => onError?.(error))
-  server.listen(PORT, "127.0.0.1", () => onListen?.(PORT))
+  server.listen(port ?? PORT, "127.0.0.1", () => onListen?.(port ?? PORT))
   // A listening socket is a handle that keeps the event loop alive. The plugin
   // host is long-lived and would not care, but anything that imports this — a
   // test run, a script — would hang on exit with nothing left to do.
@@ -409,6 +424,7 @@ export const readoutInternals = {
   SCRIPT_TAG,
   MARKER,
   SYSTEM_ENTRY_DIRS,
+  appCandidates,
   findApp,
   openAsar,
   injectTag,

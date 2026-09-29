@@ -8,16 +8,14 @@ import { serve, syncRenderer } from "./readout.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
 // The status directory and the OPENCODE_LATENCY_* variables keep the name this
-// plugin had before it was called opencode-vitals. The bar, the selftest and
-// every installed copy agree on those strings, so renaming them here would
-// orphan a bar that is already running. PLUGIN_ID only ever appears in a log
-// line, so it carries the name people actually recognise.
+// plugin had before it was called opencode-vitals. Renaming them here would
+// orphan every measurement file an installed copy has already written.
+// PLUGIN_ID only ever appears in a log line, so it carries the name people
+// actually recognise.
 const STORAGE_KEY = "history-v2"
 const DEFAULT_HISTORY_LIMIT = 20
 const MAX_HISTORY_LIMIT = 100
 const STATUS_DIR = join(tmpdir(), "opencode-latency-monitor")
-const STATUS_FILE = join(STATUS_DIR, "latest.json")
-const CURRENT_SESSION_FILE = join(STATUS_DIR, "current-session.json")
 const SESSION_TOTALS_FILE = join(STATUS_DIR, "session-totals.json")
 const RESPONSE_MARKER_TTL_MS = 10 * 60 * 1000
 const STORAGE_LOCK_TTL_MS = 5 * 1000
@@ -49,16 +47,11 @@ const RUNTIME_KEY = Symbol.for("opencode.latency-monitor.runtimes")
 // OpenCode runs plugin setup once per location and may evaluate this module more
 // than once in the same process, so the companion state lives on globalThis.
 const COMPANIONS_KEY = Symbol.for("opencode.latency-monitor.companions")
+// Shared across every plugin instance in the process, because OpenCode loads
+// this plugin once per project and they all prune the same marker directory.
+// Its nine fields used to track a spawned bar's retry state; one is left.
 const companions = globalThis[COMPANIONS_KEY] ?? (globalThis[COMPANIONS_KEY] = {
-  popup: null,
-  popupBuild: 0,
-  popupChain: Promise.resolve(),
-  popupUnavailableUntil: 0,
-  popupFailures: 0,
-  popupStartedAt: 0,
-  popupPython: null,
   lastMarkerPruneAt: 0,
-  desktopCheck: null,
 })
 
 // The bar's lock file used to live here. The readout is drawn by the app's own
@@ -129,6 +122,8 @@ function withTimeout(promise, milliseconds) {
 // and no lock to lose; what remains is keeping a copy of the app's renderer in
 // step with the app, and answering for the session the window says it is showing.
 let readoutServer = null
+// Latches so a persistent failure is reported once rather than every second.
+let readoutPlacementWarned = false
 
 // One server for the machine, many plugin instances behind it: OpenCode loads
 // this plugin once per project and they all share a process. The server cannot
@@ -138,11 +133,16 @@ let readoutServer = null
 const readoutStates = new Set()
 
 function totalsForSession(sessionID) {
+  let answer = { sessionID: typeof sessionID === "string" && sessionID ? sessionID : null, totals: null, live: null }
   for (const state of readoutStates) {
     const found = state.totalsFor(sessionID)
+    // Take whichever part this state actually knows: an in-flight reply can be
+    // here before the session has any completed totals, and returning early on
+    // a null `totals` would throw that reply away.
     if (found.totals) return found
+    if (found.live) answer.live = found.live
   }
-  return { sessionID: typeof sessionID === "string" && sessionID ? sessionID : null, totals: null }
+  return answer
 }
 
 function syncReadout() {
@@ -162,6 +162,16 @@ function startReadout(state) {
   if (!readoutServer) {
     readoutServer = serve({
       getSession: totalsForSession,
+      onStatus: ({ placed, detail }) => {
+        // Once, and only when it is wrong. This is the only signal that the app
+        // renamed the slot the readout hangs on, and the symptom is a row that
+        // silently is not there.
+        if (!placed && !readoutPlacementWarned) {
+          readoutPlacementWarned = true
+          state.warn(null, `readout not shown: ${detail}`)
+        }
+        if (placed) readoutPlacementWarned = false
+      },
       onError: (error) => {
         readoutServer = null
         state.warn(null, `readout server stopped: ${String(error)}`)
@@ -171,6 +181,20 @@ function startReadout(state) {
   const synced = syncReadout()
   return synced.ok ? { ok: true, ...synced } : { ok: false, served: true, reason: synced.reason }
 }
+
+// -- a reply in flight --------------------------------------------------------
+//
+// Records used to be written only when a response finished, so the readout sat
+// on the previous reply's numbers for the whole of the current one — the one
+// moment the numbers are actually worth watching. The turn already holds
+// everything needed to describe itself mid-flight, and the readout asks for it
+// when it polls, so there is nothing to write and nothing to keep fresh.
+//
+// This never touches the totals. A reply in progress has a rate that will
+// change, and a turn that has not ended has not been counted; folding a
+// provisional figure into a session's own numbers would make them mean two
+// things at once. The readout shows the completed session and, beside it, the
+// reply in flight.
 
 // The status directory sits in a temporary directory, which on Linux is
 // world-writable and shared between users. Creating it 0700 keeps another local
@@ -230,10 +254,6 @@ async function notePluginVersion() {
   if (Number.isFinite(previous?.seenAt)) payload.seenAt = previous.seenAt
   await writeJsonAtomic(PLUGIN_VERSION_FILE, payload).catch(() => {})
   return { version, changed: true, previous: known }
-}
-
-async function publishStatus(record) {
-  await writeJsonAtomic(STATUS_FILE, record)
 }
 
 // Pruning is throttled on a timestamp shared by every plugin instance in the
@@ -566,9 +586,6 @@ function createState(rawOptions, context = {}) {
   let storage
   let persistChain = Promise.resolve()
   let currentSession = { known: false, id: null }
-  // The last time any event for a measured session arrived, not the last time a
-  // response finished: a reply in progress is the bar at its most useful.
-  let lastEventAt = null
 
   function writeLine(ctx, line, level) {
     // One sink, not two: OpenCode's own logger when the host offers it, the
@@ -632,47 +649,36 @@ function createState(rawOptions, context = {}) {
   // OpenCode instance on the machine to publish won it, and its numbers were
   // shown under whichever project the bar belonged to. Each instance now writes
   // only its own key and merges the rest, so a bar can ask for its project.
-  function publishCurrentSession() {
-    if (!options.popup) return
-    const entry = currentSession.known && currentSession.id
-      ? { available: true, sessionID: currentSession.id, source: "events", observedAt: now() }
-      : { available: false, source: "events", observedAt: now() }
-    // The read and the write are one locked step: a second instance publishing
-    // between them would otherwise be lost, which is the bug this shape exists
-    // to remove.
-    void withStorageLock(async () => {
-      const projects = {}
-      try {
-        const raw = JSON.parse(await readFile(CURRENT_SESSION_FILE, "utf8"))
-        if (isRecord(raw?.projects)) Object.assign(projects, raw.projects)
-      } catch {
-        // No file yet, or a v1 file holding a single slot.
-      }
-      if (project) projects[project] = entry
-      await writeJsonAtomic(CURRENT_SESSION_FILE, { version: 2, observedAt: now(), projects })
-    }).catch(() => {})
-  }
-
+  // The session on screen, held in memory. It used to be published to a file,
+  // because a separate process had to be told; the readout is asked directly now,
+  // so there is nothing to publish — and writing it out cost a storage-lock
+  // acquisition on every prompt.
   function setCurrentSessionId(sessionID) {
     if (typeof sessionID !== "string" || !sessionID) return
-    if (currentSession.known && currentSession.id === sessionID) {
-      publishCurrentSession()
-      return
-    }
     currentSession = { known: true, id: sessionID }
-    publishCurrentSession()
   }
 
-  // The companion tick asks whether a bar still belongs on the screen, and the
-  // answer is "was anything measured recently". Activity, not a completed
-  // record: a long reply streams deltas for a minute before it finishes, and a
-  // bar that stood down mid-reply would leave exactly when it is worth reading.
-  function noteActivityFor(runtime) {
-    if (lastEventAt !== null) runtime.openSessionAt = lastEventAt
-  }
-
-  function refreshCurrentSession() {
-    if (currentSession.known && currentSession.id) publishCurrentSession()
+  // A reply in progress, described without pretending to be finished. The
+  // streaming span is the same denominator the finished record uses, and it
+  // stays null until something has actually streamed: a rate before the first
+  // token would divide by almost nothing.
+  function liveRecord(turn, at) {
+    const streamMs = spanTotal(turn)
+    const characters = turn.characterCount + turn.reasoningCharacterCount
+    return {
+      sessionID: turn.sessionID,
+      live: true,
+      agent: turn.agent,
+      model: turn.model,
+      startedAt: new Date(turn.startedAt).toISOString(),
+      elapsedMs: at - turn.startedAt,
+      firstTokenMs: turn.firstTokenAt === null ? null : turn.firstTokenAt - turn.startedAt,
+      characterCount: characters,
+      toolArgCharacters: turn.toolArgCharacters,
+      stepCount: turn.stepCount,
+      charactersPerSecond: streamMs !== null && streamMs > 0 ? characters / (streamMs / 1000) : null,
+      observedAt: at,
+    }
   }
 
   async function load() {
@@ -1153,6 +1159,10 @@ function createState(rawOptions, context = {}) {
   // is the mistake that made a fresh tab display someone else's turns.
   function totalsFor(sessionID) {
     const totals = typeof sessionID === "string" && sessionID ? sessionTotals.get(sessionID) : null
+    // The in-flight reply, when this session has one. Provisional by nature: it
+    // is not part of the totals above, and the readout shows it dimmed beside
+    // them so a moving number is never mistaken for a settled one.
+    const turn = typeof sessionID === "string" && sessionID ? active.get(sessionID) : null
     return {
       sessionID: typeof sessionID === "string" && sessionID ? sessionID : null,
       totals: totals
@@ -1166,6 +1176,7 @@ function createState(rawOptions, context = {}) {
             updatedAt: totals.updatedAt,
           }
         : null,
+      live: turn ? liveRecord(turn, now()) : null,
     }
   }
 
@@ -1414,9 +1425,9 @@ function createState(rawOptions, context = {}) {
         (unknownEventTotal > 0 ? ` unknown_events=${unknownEventTotal} [${record.unknownEventTypes}]` : ""),
     )
     if (options.popup) {
-      void publishStatus(record).catch((error) => {
-        warn(ctx, `could not publish popup status: ${String(error)}`)
-      })
+      // The readout reads the totals from memory, so this file is now only for
+      // the author's own post-mortem and for anything a future reader wants to
+      // inspect. It is written once per finished turn, not per event.
       void publishSessionTotals().catch((error) => {
         warn(ctx, `could not publish session totals: ${String(error)}`)
       })
@@ -1440,12 +1451,6 @@ function createState(rawOptions, context = {}) {
     }
     const sessionID = readSessionID(value)
     if (!sessionID) return
-    // Any event for a session is proof the session is live, including the ones
-    // this plugin does not measure. Stamped before the dispatch below so an
-    // ignored or unknown event still counts as activity. This is the arrival
-    // time and not the event's own `created`: a replayed event is old, and
-    // liveness is about now.
-    lastEventAt = now()
 
     if (type === "session.viewed") {
       setCurrentSessionId(sessionID)
@@ -1629,14 +1634,11 @@ function createState(rawOptions, context = {}) {
     begin,
     handle,
     setCurrentSessionId,
-    refreshCurrentSession,
-    noteActivityFor,
     totalsFor,
     unknownEventTypes: summarizeUnknownEvents,
   }
 }
 
-// Exported for the plugin's own test suite; OpenCode only uses the default export.
 // Exported for the plugin's own test suite; OpenCode only uses the default
 // export. Only what a test actually reaches is listed here: an export nothing
 // reads is a second copy of the truth, and it goes stale silently.

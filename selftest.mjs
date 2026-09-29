@@ -12,7 +12,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
-import { readoutInternals, rendererReady, syncRenderer } from "./readout.mjs"
+import { readoutInternals } from "./readout.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const lines = []
@@ -53,14 +53,25 @@ say(Boolean(entry), "the app has a launcher entry", entry ? `${entry.name} → $
 const binary = entry ? readoutInternals.appBinary(entry, app) : null
 say(Boolean(binary && existsSync(binary)), "the launcher binary is where the entry says", binary ?? "unknown")
 
-const synced = syncRenderer()
-say(synced.ok, "the app's renderer can be copied", synced.ok ? `${synced.fingerprint}${synced.changed ? " (refreshed)" : " (already current)"}` : synced.reason)
-say(rendererReady(), "the readout renderer is in place", readoutInternals.RENDERER_DIR)
-
-if (synced.ok) {
-  const html = readFileSync(join(readoutInternals.RENDERER_DIR, "index.html"), "utf8")
-  say(html.includes("vitals.js"), "the readout is wired into the copied page")
-  say(existsSync(join(readoutInternals.RENDERER_DIR, "assets")), "the page's assets came with it")
+// Read-only on purpose. The question is whether this machine *can* show the
+// readout, and the answer comes from reading the app's bundle — making the copy
+// to find out would leave forty-odd megabytes behind on a machine that was only
+// being asked a question.
+const report = readoutInternals.inspect()
+say(report.ok, report.ok ? "the app's renderer can be found" : "the app's renderer can be found", report.ok ? report.fingerprint : report.reason)
+if (report.ok) {
+  say(report.injectable, "the readout can be injected beside the app's bundle", report.injectable ? "the page loads a module bundle" : report.reason)
+  // A note, not a check. Whether a copy exists yet is a fact about the install,
+  // not about the machine — and this command is meant to be run *before*
+  // installing, where "no copy" is the correct answer and failing on it would
+  // mean the check could never pass on a machine that has not installed yet.
+  if (!report.copy.present) {
+    note("no copy of the renderer yet; the first start after installing makes one", readoutInternals.RENDERER_DIR)
+  } else if (report.copy.current) {
+    note("a copy of the renderer is in place, and it matches this build")
+  } else {
+    note("a copy of the renderer is in place but from an older build; the next start replaces it")
+  }
 }
 
 note("the readout is served by the plugin, not by this command")

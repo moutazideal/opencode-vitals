@@ -2059,6 +2059,61 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   rmSync(root, { recursive: true, force: true })
 }
 
+// The check has to stay a check. It used to prove it could copy the app's
+// renderer by copying it, which left forty-odd megabytes on a machine that was
+// only being asked whether it could — and a check that mutates cannot be run
+// twice to see whether anything changed, which is the main reason to run it
+// twice.
+{
+  const home = mkdtempSync(join(tmpdir(), "vitals-inspect-"))
+  const bundle = join(home, "App", "resources", "app.asar")
+  mkdirSync(join(home, "App", "resources"), { recursive: true })
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  const previousDir = process.env.OPENCODE_VITALS_DIR
+  process.env.OPENCODE_DESKTOP_APP = bundle
+  process.env.OPENCODE_VITALS_DIR = join(home, "work")
+  const { inspect } = await import(`../readout.mjs?inspect=${Date.now()}`)
+
+  const writeBundle = (page) => {
+    const json = Buffer.from(JSON.stringify({ files: { out: { files: { renderer: { files: {
+      "index.html": { size: page.length, offset: "0" },
+    } } } } } }), "utf8")
+    const padding = (4 - (json.length % 4)) % 4
+    const header = Buffer.alloc(16)
+    header.writeUInt32LE(4, 0)
+    header.writeUInt32LE(8 + json.length + padding, 4)
+    header.writeUInt32LE(json.length + padding, 8)
+    header.writeUInt32LE(json.length, 12)
+    writeFileSync(bundle, Buffer.concat([header, json, Buffer.alloc(padding), page]))
+  }
+
+  check("a machine with no app is reported, not thrown", inspect().ok === false && /no OpenCode desktop app/.test(inspect().reason ?? ""), JSON.stringify(inspect()))
+  writeBundle(Buffer.from('<!doctype html><script type="module" src="./assets/main-a.js"></script>'))
+  const good = inspect()
+  check("a readable bundle is reported with its fingerprint", good.ok === true && /^[0-9a-f]{32}$/.test(good.fingerprint ?? ""), JSON.stringify(good.fingerprint))
+  check("and it says the readout could be injected", good.injectable === true, JSON.stringify(good.reason))
+  check("and that no copy exists yet", good.copy.present === false && good.copy.current === false, JSON.stringify(good.copy))
+  check("and it wrote nothing at all", !existsSync(join(home, "work")), JSON.stringify(readdirSync(home)))
+  // Run it again: this is the whole point. A check that changes the thing it
+  // measures cannot be used to find out whether anything changed.
+  const again = inspect()
+  check("running it twice gives the same answer", again.fingerprint === good.fingerprint && again.copy.present === false)
+  check("and still wrote nothing", !existsSync(join(home, "work")))
+
+  // A page with no module bundle is the one case where a copy would not help, and
+  // saying so is the whole reason the copy is not made to find out.
+  writeBundle(Buffer.from("<!doctype html><html></html>"))
+  const bare = inspect()
+  check("a page with no bundle to sit beside is a clear no", bare.ok === true && bare.injectable === false && /module bundle/.test(bare.reason ?? ""), JSON.stringify(bare))
+  check("and still nothing was written", !existsSync(join(home, "work")))
+
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
+  if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = previousDir
+  rmSync(home, { recursive: true, force: true })
+}
+
 for (const result of results) {
   console.log(`${result.ok ? "ok  " : "FAIL"} ${result.name}${result.detail ? ` ${result.detail}` : ""}`)
 }

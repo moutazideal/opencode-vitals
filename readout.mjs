@@ -218,11 +218,52 @@ export function syncRenderer({ force = false } = {}) {
   }
 }
 
+// Everything a check needs to answer "can this machine show the readout", without
+// doing any of it.
+//
+// syncRenderer is how the copy gets made, and it makes one: forty-odd megabytes.
+// Using it as a diagnostic meant that running the check left behind a directory
+// the person had not asked for — and a check that mutates the machine cannot be
+// run twice to see whether anything changed, which is the only reason to run it
+// twice. So this reads the bundle, proves the readout could be injected beside
+// it, and reports whether a copy is present and current. It writes nothing.
+export function inspect() {
+  const path = findApp()
+  if (!path) return { ok: false, reason: "no OpenCode desktop app found" }
+  let asar
+  try {
+    asar = openAsar(path)
+  } catch (error) {
+    return { ok: false, reason: `could not read ${path}: ${String(error)}` }
+  }
+  if (!asar.has(["out", "renderer", "index.html"])) {
+    return { ok: false, reason: `${path} has no out/renderer/index.html` }
+  }
+  const app = createHash("sha256").update(path).digest("hex").slice(0, 8)
+  const stamp = { app, fingerprint: fingerprint({ ...asar, path }) }
+  // The one question a copy cannot answer without being made: is there a module
+  // bundle for the readout to sit beside? Injecting into a buffer proves it and
+  // costs nothing.
+  const injected = injectTag(asar.read(["out", "renderer", "index.html"]))
+  const installed = readMarker()
+  return {
+    ok: true,
+    ...stamp,
+    injectable: Boolean(injected),
+    reason: injected ? null : "the app's index.html loads no module bundle this can sit beside",
+    copy: {
+      present: rendererReady(),
+      // "current" is a claim about the copy on disk, so it is only true when the
+      // copy was made from this exact bundle.
+      current: Boolean(installed && installed.app === stamp.app && installed.fingerprint === stamp.fingerprint),
+    },
+  }
+}
+
 export function rendererReady() {
   try {
     return existsSync(join(RENDERER_DIR, "index.html")) && existsSync(join(RENDERER_DIR, "vitals.js"))
-  } catch {
-    return false
+  } catch {    return false
   }
 }
 
@@ -439,6 +480,7 @@ export const readoutInternals = {
   SYSTEM_ENTRY_DIRS,
   appCandidates,
   findApp,
+  inspect,
   openAsar,
   injectTag,
   readSystemEntry,

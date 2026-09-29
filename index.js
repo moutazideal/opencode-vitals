@@ -1,11 +1,10 @@
-import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { removeDesktopEntry, serve, syncRenderer } from "./readout.mjs"
+import { serve, syncRenderer } from "./readout.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
 // The status directory and the OPENCODE_LATENCY_* variables keep the name this
@@ -77,20 +76,6 @@ const SUBAGENT_FIELDS = ["subagentTurns", "subagentSteps"]
 // A slow or absent session API must not hold a finished measurement open: the
 // turn is already complete and its numbers are already known.
 const SESSION_LOOKUP_TIMEOUT_MS = 2000
-// How often the plugin reconsiders whether a bar belongs on the screen, and how
-// long a session may go without any event before the bar stands down. OpenCode
-// keeps running with no session open, and a measurement bar outliving every
-// session it was measuring is the bug this pair removes. The tick is a fraction
-// of the idle window so the bar leaves when it says it will.
-const COMPANION_TICK_MS = 1000
-const IDLE_HIDE_MS = 10_000
-// The OpenCode service is supervised by systemd and outlives the Desktop app, so
-// the bar cannot be tied to the plugin process alone. No server event reports a
-// client disconnect, so the app process itself is the signal.
-const DESKTOP_PROCESS_NAMES = ["ai.opencode.desktop", "opencode-desktop", "OpenCode"]
-const DESKTOP_MISSING_GRACE_MS = 10 * 60 * 1000
-const DESKTOP_CHECK_TTL_MS = 4000
-
 // Every OpenCode instance on the machine shares one status directory, so a
 // session number is only meaningful next to the project it belongs to. The
 // canonical project root is preferred over this instance's own directory, so a
@@ -185,11 +170,6 @@ function startReadout(state) {
   }
   const synced = syncReadout()
   return synced.ok ? { ok: true, ...synced } : { ok: false, served: true, reason: synced.reason }
-}
-
-function stopReadout() {
-  readoutServer?.close()
-  readoutServer = null
 }
 
 // The status directory sits in a temporary directory, which on Linux is
@@ -1657,22 +1637,13 @@ function createState(rawOptions, context = {}) {
 }
 
 // Exported for the plugin's own test suite; OpenCode only uses the default export.
+// Exported for the plugin's own test suite; OpenCode only uses the default
+// export. Only what a test actually reaches is listed here: an export nothing
+// reads is a second copy of the truth, and it goes stale silently.
 export const vitalsInternals = {
   RESPONSE_MARKER_TTL_MS,
-  READOUT_SYNC_INTERVAL_MS,
-  STREAM_GAP_LIMIT_MS,
   HANDLED_TYPES,
-  IGNORED_TYPES,
-  IGNORED_PREFIXES,
-  isIgnoredEventType,
-  RECENT_RATE_COUNT,
-  SUBAGENT_FIELDS,
-  SESSION_LOOKUP_TIMEOUT_MS,
   SESSION_TOTALS_FILE,
-  CURRENT_SESSION_FILE,
-  projectKeyFor,
-  runtimeFor,
-  withTimeout,
   readOwnVersion,
   notePluginVersion,
   claimResponse,

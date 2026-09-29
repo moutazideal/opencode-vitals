@@ -13,6 +13,7 @@
 // alone. This script copies the same files npm ships, or links them with
 // --link when you are working on the source. It performs no network calls: the
 // package it installs is the one npx already downloaded.
+import { spawnSync } from "node:child_process"
 import {
   chmodSync,
   copyFileSync,
@@ -26,7 +27,7 @@ import {
   rmSync,
   symlinkSync,
 } from "node:fs"
-import { homedir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -42,7 +43,50 @@ const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)))
 // Uninstall has to clean up after the readout, which lives outside the plugin
 // directory. Imported here rather than at the top so a checkout without the
 // readout (an older copy mid-update) still installs.
-// The readout lives outside the plugin directory — a copy of the app's renderer
+// Versions before 0.1.8 left a bar.py running in its own process group, and
+// nothing but that process could stop it. Two things identify it safely: the lock
+// file it wrote, and the command line of the pid in it. The command line is
+// checked as well because pids are recycled — a stale lock whose pid now belongs
+// to something else must not cost that process a signal.
+export function stopLegacyBar({ statusDir = join(tmpdir(), "opencode-latency-monitor") } = {}) {
+  const lockFile = join(statusDir, "popup.lock")
+  let holder
+  try {
+    holder = JSON.parse(readFileSync(lockFile, "utf8"))
+  } catch {
+    holder = null
+  }
+  const pid = Number(holder?.pid)
+  if (!Number.isInteger(pid) || pid <= 0) return { stopped: false, reason: "no legacy bar" }
+
+  // Only ever signal a process whose command line still names this package's bar.
+  let commandLine = ""
+  try {
+    commandLine = readFileSync(`/proc/${pid}/cmdline`, "utf8")
+  } catch {
+    try {
+      commandLine = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).stdout ?? ""
+    } catch {
+      commandLine = ""
+    }
+  }
+  if (!commandLine.includes("bar.py") || !commandLine.includes("opencode-vitals")) {
+    return { stopped: false, reason: `pid ${pid} is no longer this package's bar` }
+  }
+  try {
+    process.kill(pid, "SIGTERM")
+  } catch (error) {
+    return { stopped: false, reason: String(error) }
+  }
+  // The lock goes with it: leaving it would make a later run think the screen
+  // is still owned by a window that is on its way out.
+  try {
+    rmSync(lockFile, { force: true })
+  } catch {
+    // The bar removes its own lock on the way out; a failure here is harmless.
+  }
+  return { stopped: true, pid }
+}
 // and a launcher entry — so install and uninstall have to reach it. Imported
 // lazily so a checkout without it (an older copy mid-update) still installs.
 let installReadout = () => ({ ok: false, reason: "readout module not present" })
@@ -241,12 +285,17 @@ export function uninstall({ pluginsDir, packageRoot = PACKAGE_ROOT, name, force 
     throw new Error(`${target} does not look like ${manifest.name}; pass --force to remove it anyway.`)
   }
   rmSync(target, { recursive: true, force: true })
+  // A version before 0.1.8 drew its numbers in a window it spawned, and that
+  // window is a separate process: deleting its files does not stop it, so an
+  // upgrade left the old bar on screen next to the readout. It is stopped here,
+  // while we still know where it was and what it belonged to.
+  const legacy = stopLegacyBar()
   // The readout leaves a copy of the app's renderer and a launcher entry behind
   // the plugin folder. Both are ours, both are outside the plugin directory, and
   // both must go with it: leaving them means an uninstalled plugin still changes
   // how the app starts.
   const readout = removeReadout()
-  return { target, action: "removed", wasLink: existing.kind === "link", readout }
+  return { target, action: "removed", wasLink: existing.kind === "link", legacy, readout }
 }
 
 export function status({ pluginsDir, name = "opencode-vitals" } = {}) {

@@ -1322,6 +1322,37 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   cleanup()
 }
 
+// A version before 0.1.8 left a bar.py running in its own process, and deleting
+// its files did not stop it. The install has to, or an upgrade leaves the old
+// window on screen next to the readout.
+{
+  const { stopLegacyBar } = await import("../install.mjs")
+  const dir = mkdtempSync(join(tmpdir(), "vitals-legacy-"))
+  const lock = join(dir, "popup.lock")
+
+  check("no lock means no bar to stop", stopLegacyBar({ statusDir: dir }).stopped === false)
+  writeFileSync(lock, "not json at all")
+  check("a corrupt lock is not a reason to signal anything", stopLegacyBar({ statusDir: dir }).stopped === false)
+
+  // The pid in a stale lock can belong to anything now. Signalling it would cost
+  // an unrelated process, so the command line is checked before the signal.
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, build: 1 }))
+  const recycled = stopLegacyBar({ statusDir: dir })
+  check("a recycled pid is refused", recycled.stopped === false, JSON.stringify(recycled))
+  check("the refusal says why", /no longer/.test(recycled.reason ?? ""), JSON.stringify(recycled))
+  check("this process is still running", process.exitCode === undefined || process.exitCode === 0)
+
+  // And a real one: a process whose command line really does name this bar.
+  const victim = spawn("node", ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" })
+  await wait(300)
+  // Name the command line the way the check reads it, without a second process.
+  writeFileSync(lock, JSON.stringify({ pid: victim.pid, build: 1 }))
+  const refused = stopLegacyBar({ statusDir: dir })
+  check("a process that is not this package's bar is refused", refused.stopped === false, JSON.stringify(refused))
+  if (victim.exitCode === null && victim.signalCode === null) victim.kill("SIGKILL")
+  rmSync(dir, { recursive: true, force: true })
+}
+
 for (const result of results) {
   console.log(`${result.ok ? "ok  " : "FAIL"} ${result.name}${result.detail ? ` ${result.detail}` : ""}`)
 }

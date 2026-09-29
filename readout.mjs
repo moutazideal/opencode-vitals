@@ -401,15 +401,14 @@ export function serve({ getSession, onListen, onError } = {}) {
   return server
 }
 
+// Exported for the selftest and the test suite. Only what is actually read from
+// here is listed: an export nobody reads is a second copy of the truth.
 export const readoutInternals = {
-  WORK_DIR,
   RENDERER_DIR,
-  DESKTOP_DIR,
   PORT,
   SCRIPT_TAG,
   MARKER,
   SYSTEM_ENTRY_DIRS,
-  appCandidates,
   findApp,
   openAsar,
   injectTag,

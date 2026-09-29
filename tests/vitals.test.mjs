@@ -1508,6 +1508,31 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   b.cleanup()
 }
 
+// The manual test sheet has to exist and has to stay honest about the two
+// things that make it worth running: it names the real test command, and it
+// still carries a known-gaps section. A checklist that quietly drops its
+// caveats is worse than no checklist.
+{
+  const checklistUrl = new URL("../docs/TEST-CHECKLIST.md", import.meta.url)
+  const present = existsSync(checklistUrl)
+  check("the manual test checklist exists", present, checklistUrl.pathname)
+  if (present) {
+    const sheet = readFileSync(checklistUrl, "utf8")
+    check("the checklist runs the real suite", /npm test/.test(sheet))
+    check("the checklist keeps a known-gaps section", /##\s*11\.\s*Known gaps/.test(sheet))
+    check("the checklist has a result column to fill in", /\| Result \|/.test(sheet))
+    // Every case is numbered, and no number is reused inside a section: a
+    // duplicate id is how two different tests end up sharing one result.
+    const ids = [...sheet.matchAll(/^\|\s*(\d+)\.(\d+)\s*\|/gm)].map((match) => `${match[1]}.${match[2]}`)
+    check("the checklist has cases", ids.length >= 100, `${ids.length} cases`)
+    const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index)
+    check("no two cases share an id", duplicates.length === 0, [...new Set(duplicates)].join(", "))
+    // The counts it quotes about the automated suite must not go stale.
+    const quoted = [...sheet.matchAll(/(\d+) checks/g)].map((match) => Number(match[1]))
+    check("the checklist's quoted counts are plausible", quoted.every((count) => count >= 100), quoted.join(","))
+  }
+}
+
 for (const result of results) {
   console.log(`${result.ok ? "ok  " : "FAIL"} ${result.name}${result.detail ? ` ${result.detail}` : ""}`)
 }

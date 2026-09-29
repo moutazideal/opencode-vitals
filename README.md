@@ -33,13 +33,13 @@ so it is the one to start with.
 **1 — Check your machine first.** It takes ten seconds and tells you whether the bar can run here:
 
 ```bash
-npx opencode-vitals selftest
+npx opencode-vitals@latest selftest
 ```
 
 **2 — Install it with one command:**
 
 ```bash
-npx opencode-vitals install
+npx opencode-vitals@latest install
 ```
 
 That copies the plugin into the folder OpenCode already looks in, and prints the path it used. It
@@ -90,27 +90,35 @@ cp -r opencode-vitals ~/.config/opencode/plugins/opencode-vitals
 This works, and it is the shape for people who want the plugin to be exactly the code in front of
 them. It is also the shape that can never update itself: a folder in the plugin directory is
 invisible to `opencode plugin list`, `plugin check` and `plugin update`, so from then on you are
-replacing it by hand. `npx opencode-vitals status` will say so.
+replacing it by hand. `npx opencode-vitals@latest status` will say so.
 
 Working on the source instead? See [For developers](#for-developers).
 
 ### The install command
 
 ```bash
-npx opencode-vitals               # register this package with OpenCode
-npx opencode-vitals install       # the same, said out loud
-npx opencode-vitals selftest      # can this machine draw the readout?
-npx opencode-vitals status        # what is installed, and which version
-npx opencode-vitals uninstall     # remove it again
+npx opencode-vitals@latest               # register this package with OpenCode
+npx opencode-vitals@latest install       # the same, said out loud
+npx opencode-vitals@latest selftest      # can this machine draw the readout?
+npx opencode-vitals@latest status        # what is installed, and which version
+npx opencode-vitals@latest uninstall     # remove it again
 
-npx opencode-vitals install --no-update   # never update itself
-npx opencode-vitals install --copy        # copy files in, no package registration
-npx opencode-vitals install --dir PATH   # use a plugin directory you choose
+npx opencode-vitals@latest install --no-update   # never update itself
+npx opencode-vitals@latest install --copy        # copy files in, no package registration
+npx opencode-vitals@latest install --dir PATH   # use a plugin directory you choose
 ```
 
 `npx` resolves *package* names, not the names of the files inside them, so the command has to be
-`npx opencode-vitals <what>`. The two older names still exist for scripts that add the package to a
-project: `opencode-vitals-install` and `opencode-vitals-selftest` (run them through npm as
+`npx opencode-vitals@latest <what>`.
+
+**Keep the `@latest`.** Without it, `npx` runs whatever the current directory already has rather
+than fetching the named version — which works in an empty directory and fails in a checkout, where
+`node_modules/.bin/opencode-vitals` may be stale or gone. The failure is
+`sh: 1: opencode-vitals: not found`, which says nothing about the real cause. With `@latest` the
+command works the same everywhere, which is what a command in a README has to do.
+
+The two older names still exist for scripts that add the package to a project:
+`opencode-vitals-install` and `opencode-vitals-selftest` (run them through npm as
 `npm exec --package=opencode-vitals -- opencode-vitals-install`).
 
 ### What installing actually does
@@ -131,7 +139,7 @@ behind.
 
 If you install a copy instead (`--copy`, or a folder you put in `plugins/` yourself), it works, but
 nothing can ever update it: `opencode plugin list` cannot see it and `opencode plugin update` does
-not know it exists. `npx opencode-vitals status` says which shape you have.
+not know it exists. `npx opencode-vitals@latest status` says which shape you have.
 
 ### Updates
 
@@ -151,7 +159,7 @@ Node has already loaded the current copy into the running process.
 To turn it off, permanently, either way:
 
 ```bash
-npx opencode-vitals install --no-update      # writes a marker file
+npx opencode-vitals@latest install --no-update      # writes a marker file
 OPENCODE_VITALS_NO_UPDATE=1                   # or just for one process
 ```
 
@@ -195,7 +203,7 @@ Every feature, in one place:
 | **It follows your tab** | Switch sessions in the app and the numbers switch with them. The readout asks for the session the window says it is showing, so switching project switches the numbers with it — it can never show another project's totals. |
 | **Nothing to clean up** | It is drawn by OpenCode's own window, so there is no second process, no lock, and nothing left on screen when you close the app. |
 | **It tells you when it updated** | A new version announces itself once in the log, so you can tell the copy you are reading about from the one that is running. |
-| **You can check what is running** | `npx opencode-vitals selftest` checks whether this machine can show the readout: the app is installed, its renderer can be copied, the copy is current, and the readout is wired into it. |
+| **You can check what is running** | `npx opencode-vitals@latest selftest` checks whether this machine can show the readout: the app is installed, its renderer can be copied, the copy is current, and the readout is wired into it. |
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/moutazideal/opencode-vitals/main/docs/bar-mini.png" width="640" alt="The readout close up: 1 turns, 1 steps, 200 tok/s and 200 last10, in the app's own muted and bright text colours">
@@ -288,7 +296,7 @@ guesses — and a wrong guess is reported rather than worked around. Run the
 selftest on your machine and you will know in a few seconds:
 
 ```bash
-npx opencode-vitals selftest    # after installing from npm
+npx opencode-vitals@latest selftest    # after installing from npm
 node selftest.mjs               # from a clone
 ```
 
@@ -361,8 +369,8 @@ How you update depends on how you installed it.
 
 | How you installed it | How to update |
 | --- | --- |
-| `npx opencode-vitals install` | Run the same command again. It updates in place. |
-| `npx opencode-vitals install --link` | `git pull` in the checkout; the link picks it up. |
+| `npx opencode-vitals@latest install` | Run the same command again. It updates in place. |
+| `npx opencode-vitals@latest install --link` | `git pull` in the checkout; the link picks it up. |
 | `"plugins": ["opencode-vitals"]` | OpenCode owns the copy: it resolves the package at startup into `~/.cache/opencode/npm/opencode-vitals@latest/<timestamp>/`. Quit and reopen OpenCode after a new version is published, then check the version below. |
 | Copied the folder | Replace the files with the new release. The running plugin picks them up within about five seconds. |
 
@@ -381,7 +389,7 @@ plugins is not something this project has verified.
 Do not assume an update landed. The selftest prints the loaded version, and the bar says so out loud:
 
 ```bash
-npx opencode-vitals selftest
+npx opencode-vitals@latest selftest
 ```
 
 ```
@@ -414,14 +422,14 @@ When the module is evaluated it compares its own `package.json` version with the
 git clone https://github.com/moutazideal/opencode-vitals.git
 cd opencode-vitals
 npm install
-npx opencode-vitals install --link
+npx opencode-vitals@latest install --link
 ```
 
 That symlinks the checkout into the plugin directory instead of copying it, so edits reach the
 running plugin within five seconds and no restart is needed. Keep the link under the folder name
 OpenCode already discovered, or the running instance will be left pointing at nothing.
 
-`npx opencode-vitals status` then reports `link` rather than `copy`, and `npx opencode-vitals
+`npx opencode-vitals@latest status` then reports `link` rather than `copy`, and `npx opencode-vitals@latest
 uninstall` removes the link without touching your checkout.
 
 To install a copy of the checkout instead, drop the `--link`. To put it somewhere else, add
@@ -441,7 +449,7 @@ opencode-vitals/
 ├── index.js            the plugin: events, accounting, storage
 ├── readout.mjs         the readout: reads the app's bundle, serves the copy
 ├── renderer/vitals.js  the readout as it appears in the composer
-├── cli.mjs             npx opencode-vitals (install, selftest, status, uninstall)
+├── cli.mjs             npx opencode-vitals@latest (install, selftest, status, uninstall)
 ├── install.mjs         the installer itself
 ├── selftest.mjs        can this machine show the readout?
 └── tests/vitals.test.mjs

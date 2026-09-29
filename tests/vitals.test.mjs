@@ -616,7 +616,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const updating = readme.slice(readme.indexOf("## Updating"))
   check("updating covers the git install", /git pull/.test(updating))
   check("updating covers the copied install", /Replace the files/.test(updating))
-  check("updating tells users how to verify", /opencode-vitals selftest/.test(updating) && /plugin version recorded — running \d+\.\d+\.\d+/.test(updating))
+  check("updating tells users how to verify", /opencode-vitals@latest selftest/.test(updating) && /plugin version recorded — running \d+\.\d+\.\d+/.test(updating))
   check("updating links both screenshots", readme.includes("docs/bar.png") && readme.includes("docs/bar-mini.png"))
   // The README is also the npm package page, where a relative docs/bar.png
   // resolves to nothing. Every image must be an absolute raw link, and the file

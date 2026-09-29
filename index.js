@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { installDesktopEntry, serve, syncRenderer } from "./readout.mjs"
+import { installDesktopEntry, removeDesktopEntry, rendererReady, serve, syncRenderer } from "./readout.mjs"
 import { START_DELAY_MS, updateIfNeeded } from "./update.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
@@ -155,6 +155,39 @@ function syncReadout() {
   } catch (error) {
     return { ok: false, reason: String(error) }
   }
+}
+
+// One decision, made wherever the plugin finds out something changed: the entry
+// exists exactly while there is a copy to serve. Kept in one place because the
+// two mistakes it prevents are the same mistake, and because a second copy of
+// this rule is a second thing to get wrong.
+async function ensureReadoutEntry(state, ctx) {
+  // A copy that is already there is a copy that can be served; one that is not
+  // is rebuilt, because not rebuilding is the state this function exists to
+  // prevent.
+  const serving = rendererReady() || syncReadout().ok
+  if (serving) {
+    const entry = installDesktopEntry()
+    if (entry.ok) {
+      readoutEntryWarned = false
+    } else if (entry.reason !== "no app" && !readoutEntryWarned) {
+      // "no app" is not a fault: a headless or TUI-only machine measures the same
+      // numbers and simply has no window to draw them in. Warning about it on
+      // every launch would teach people to ignore this plugin's warnings.
+      readoutEntryWarned = true
+      state.warn(null, `readout launcher entry not installed: ${entry.reason}`)
+    }
+    return { serving: true, entry }
+  }
+  // Not serving, so nothing may point at us. An entry left behind here is the
+  // one state in which the application cannot start, and leaving it behind is
+  // what a `rm -rf` of the data directory used to do.
+  const removed = removeDesktopEntry()
+  if (removed.ok && !readoutEntryWarned) {
+    readoutEntryWarned = true
+    state.warn(ctx, "readout removed its launcher entry: the app's interface copy could not be built, so OpenCode was left to start itself")
+  }
+  return { serving: false, entry: removed }
 }
 
 function startReadout(state) {
@@ -1694,6 +1727,18 @@ export default {
       if (markerTimer) clearInterval(markerTimer)
       if (runtime.markerTimer === markerTimer) runtime.markerTimer = null
       if (updateTimer) clearTimeout(updateTimer)
+      // The listening socket, closed with the plugin that opened it. unref()
+      // stops it holding the event loop open, which is a different thing: the
+      // socket still held the port, so a reloaded plugin found 8971 taken by the
+      // instance that was unloading, was refused the bind, and left with no
+      // server at all — a readout that silently stops, on every reload, forever.
+      // close() releases the port at once; the second call drops the keep-alive
+      // connections the readout's own polling holds open.
+      if (readoutServer) {
+        readoutServer.close(() => {})
+        readoutServer.closeAllConnections?.()
+        readoutServer = null
+      }
       if (runtime.controller === controller) runtime.controller = null
       // A reloaded instance must not keep answering for a session it no longer
       // measures: the state leaves the pool with its cleanup.
@@ -1711,8 +1756,18 @@ export default {
           const synced = syncReadout()
           if (!synced.ok) {
             state.warn(ctx, `readout: ${synced.reason}`)
-            return
           }
+          // Whatever the copy did, the entry has to agree with it. This is the
+          // backstop for the case nobody can enumerate: anything that empties the
+          // directory behind our back leaves an entry pointing at a server with
+          // nothing to serve, and the next tick is the next chance to notice.
+          void (async () => {
+            try {
+              await ensureReadoutEntry(state, ctx)
+            } catch (error) {
+              state.warn(ctx, `readout launcher entry: ${String(error)}`)
+            }
+          })()
           // The copy is refreshed when OpenCode updates itself, but the open
           // window is still running the page it loaded before that — the old
           // app's code against the new service, with nothing on screen to say
@@ -1749,18 +1804,23 @@ export default {
     // by OpenCode in the background and the first thing to execute is this file.
     // A plugin that only set itself up when its own installer ran would be a
     // plugin with no readout, which is the state this is here to prevent.
-    try {
-      const entry = installDesktopEntry()
-      // "no app" is not a fault: a headless or TUI-only machine measures the same
-      // numbers and simply has no window to draw them in. Warning about it on
-      // every launch would teach people to ignore this plugin's warnings.
-      if (!entry.ok && entry.reason !== "no app" && !readoutEntryWarned) {
-        readoutEntryWarned = true
-        state.warn(null, `readout launcher entry not installed: ${entry.reason}`)
+    //
+    // It is written only when there is something to serve, and it is taken away
+    // when there is not. That condition is the whole point. The entry is what
+    // hands the entire application over to this server, so an entry pointing at a
+    // server that cannot answer is not a missing readout — it is a window that
+    // will not open, and the plugin's first rule is that it never breaks
+    // OpenCode. Both halves are here because either alone leaves a window: write
+    // only if serving, and the failure is a stale entry left from a previous
+    // good state; remove only if not serving, and the failure is that the setup
+    // never happened.
+    void (async () => {
+      try {
+        await ensureReadoutEntry(state, ctx)
+      } catch (error) {
+        state.warn(null, `readout launcher entry: ${String(error)}`)
       }
-    } catch (error) {
-      state.warn(null, `readout launcher entry not installed: ${String(error)}`)
-    }
+    })()
     void later(() => updateIfNeeded({ onReport: (message) => state.warn(null, message) }))
 
     if (!ctx.event?.subscribe) {

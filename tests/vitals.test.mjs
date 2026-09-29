@@ -2123,6 +2123,110 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   rmSync(home, { recursive: true, force: true })
 }
 
+// The failure this readout is not allowed to have: OpenCode's whole interface is
+// served from here, so anything this server cannot answer is an application that
+// will not open. These are the cases where that used to be true.
+{
+  const home = mkdtempSync(join(tmpdir(), "vitals-brick-"))
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  const previousDir = process.env.OPENCODE_VITALS_DIR
+  const previousData = process.env.XDG_DATA_HOME
+  const work = join(home, "work")
+  const apps = join(home, "applications")
+  mkdirSync(apps, { recursive: true })
+  process.env.OPENCODE_VITALS_DIR = work
+  process.env.XDG_DATA_HOME = home
+  const bundle = join(home, "App", "resources", "app.asar")
+  process.env.OPENCODE_DESKTOP_APP = bundle
+  mkdirSync(join(home, "App", "resources"), { recursive: true })
+
+  // A system launcher whose Exec sits two levels up from the bundle, which is
+  // where the reader looks to decide that a launcher entry belongs to this app.
+  const sysApps = join(home, "system", "applications")
+  mkdirSync(sysApps, { recursive: true })
+  writeFileSync(join(sysApps, "ai.opencode.desktop.desktop"), ["[Desktop Entry]", "Name=OpenCode", `Exec=${join(home, "App", "ai.opencode.desktop")} %U`, ""].join("\n"))
+
+  // A bundle holding a page that loads a module, which is the only shape the
+  // readout can sit beside.
+  const writeBundle = (page) => {
+    const json = Buffer.from(JSON.stringify({ files: { out: { files: { renderer: { files: {
+      "index.html": { size: page.length, offset: "0" },
+    } } } } } }), "utf8")
+    const padding = (4 - (json.length % 4)) % 4
+    const header = Buffer.alloc(16)
+    header.writeUInt32LE(4, 0)
+    header.writeUInt32LE(8 + json.length + padding, 4)
+    header.writeUInt32LE(json.length + padding, 8)
+    header.writeUInt32LE(json.length, 12)
+    writeFileSync(bundle, Buffer.concat([header, json, Buffer.alloc(padding), page]))
+  }
+  const page = Buffer.from('<!doctype html><script type="module" crossorigin src="./assets/main-abc123.js"></script></html>')
+  writeBundle(page)
+
+  const { serve, rendererReady, readoutInternals } = await import(`../readout.mjs?brick=${Date.now()}`)
+  const port = readoutInternals.PORT + 2
+  const server = serve({ getSession: () => ({ sessionID: null, totals: null }), port })
+  for (let attempt = 0; attempt < 40 && !server.listening; attempt += 1) await wait(25)
+  const get = async (path) => {
+    const response = await fetch(`http://127.0.0.1:${port}${path}`)
+    return { status: response.status, body: await response.text() }
+  }
+
+  // A renderer that is not there yet: the first request is what repairs it, and
+  // it is repaired before the answer rather than after it. Before this, a window
+  // that reloaded in that state got a 404 and refused to open.
+  check("with no copy, the app's own page is not a 404", (await get("/index.html")).status === 200, JSON.stringify(await get("/index.html")).slice(0, 120))
+  check("and the copy now exists", rendererReady())
+
+  // The report's reproduction: the data directory is emptied behind our back and
+  // the window is reloaded.
+  rmSync(join(work, "renderer"), { recursive: true, force: true })
+  check("the copy is really gone", rendererReady() === false)
+  const recovered = await get("/index.html")
+  check("a reload after the copy is deleted is served, not 404", recovered.status === 200 && /vitals\.js/.test(recovered.body), JSON.stringify(recovered.status))
+  check("and it was rebuilt rather than left missing", rendererReady() === true)
+
+  // A directory that is there but empty is a different state from one that is
+  // gone, and it is the one a half-finished build leaves behind.
+  rmSync(join(work, "renderer"), { recursive: true, force: true })
+  mkdirSync(join(work, "renderer"), { recursive: true })
+  check("an empty copy directory is repaired", (await get("/index.html")).status === 200)
+
+  // A copy that cannot be built must not be rebuilt on every request, or a
+  // failure turns into a machine copying forty megabytes per asset.
+  rmSync(bundle)
+  rmSync(join(work, "renderer"), { recursive: true, force: true })
+  const started = Date.now()
+  for (let request = 0; request < 12; request += 1) await get("/index.html")
+  const elapsed = Date.now() - started
+  check("an unrecoverable copy is not rebuilt on every request", elapsed < 5_000, `${elapsed}ms for 12 requests`)
+  // Two different failures for two different requests, and both are plain: the
+  // document is a 503 because there is nothing to serve, and a named asset is a
+  // 404 because that file is not there. Neither is a hang and neither is a page
+  // of HTML answered where a script was asked for.
+  check("the document is a plain 503 when nothing can be served", (await get("/")).status === 503, JSON.stringify((await get("/")).status))
+  check("a named asset is a plain 404", (await get("/assets/main-abc123.js")).status === 404, JSON.stringify((await get("/assets/main-abc123.js")).status))
+
+  // The build must never be the reason there is no interface. It used to delete
+  // the copy and then copy, so a failure in between left nothing at all.
+  writeBundle(page)
+  const { syncRenderer, readoutInternals: ri } = await import(`../readout.mjs?atomic=${Date.now()}`)
+  const first = syncRenderer()
+  check("a fresh build succeeds", first.ok === true && rendererReady(), JSON.stringify(first))
+  const rebuilt = syncRenderer({ force: true })
+  check("a rebuild replaces the copy", rebuilt.ok === true && rendererReady(), JSON.stringify(rebuilt))
+  check("and leaves no staging or retired directory behind", !existsSync(`${ri.RENDERER_DIR}.new`) && !existsSync(`${ri.RENDERER_DIR}.old`), `${existsSync(`${ri.RENDERER_DIR}.new`)} ${existsSync(`${ri.RENDERER_DIR}.old`)}`)
+
+  await new Promise((resolve) => server.close(resolve))
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
+  if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = previousDir
+  if (previousData === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = previousData
+  rmSync(home, { recursive: true, force: true })
+}
+
 for (const result of results) {
   console.log(`${result.ok ? "ok  " : "FAIL"} ${result.name}${result.detail ? ` ${result.detail}` : ""}`)
 }

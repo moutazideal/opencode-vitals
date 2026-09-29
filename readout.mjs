@@ -18,6 +18,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -182,6 +183,50 @@ function copyTree(asar, from, to) {
   return true
 }
 
+// Rebuilding from inside a request handler, at most once per cool-down.
+//
+// The rebuild is synchronous and copies tens of megabytes, so it blocks the
+// plugin host's event loop for as long as it takes. That is a deliberate trade:
+// a two-second pause in measuring is a smaller cost than a window that will not
+// open, and it only ever happens when the copy is already gone.
+//
+// The cool-down is the other half. An app whose bundle cannot be read would
+// otherwise rebuild on every single asset it asks for — a request loop doing
+// forty megabytes of copying per request — and turn a failure into a machine
+// that cannot be used for anything else.
+let rebuilding = false
+let lastRebuildAt = 0
+let lastRebuildFailed = false
+const REBUILD_COOLDOWN_MS = 30_000
+
+function ensureCopy() {
+  if (rendererReady()) return true
+  const at = Date.now()
+  if (rebuilding) return false
+  // The cool-down counts failed attempts, not elapsed time. A copy that was
+  // serving a moment ago and has gone is a new failure, and it is the kind worth
+  // trying at once — usually someone deleted it, and the fix is to put it back.
+  // What must not repeat is a build that cannot succeed, and the only thing that
+  // tells those apart is whether the last attempt worked.
+  if (lastRebuildFailed && at - lastRebuildAt < REBUILD_COOLDOWN_MS) return false
+  rebuilding = true
+  lastRebuildAt = at
+  try {
+    // Forced. Without it the fingerprint of an unchanged app says "already
+    // current" and returns without copying anything, which is exactly right for
+    // a scheduled sync and exactly wrong for a repair: the app has not changed,
+    // the copy has.
+    const ok = syncRenderer({ force: true }).ok && rendererReady()
+    lastRebuildFailed = !ok
+    return ok
+  } catch {
+    lastRebuildFailed = true
+    return false
+  } finally {
+    rebuilding = false
+  }
+}
+
 // Bring the copy in line with the installed app. Returns what happened, so the
 // caller can log it once instead of guessing.
 export function syncRenderer({ force = false } = {}) {
@@ -205,15 +250,46 @@ export function syncRenderer({ force = false } = {}) {
     return { ok: true, changed: false, ...stamp }
   }
 
+  // Built beside the copy and moved into place, never built over it.
+  //
+  // Deleting first and copying second — which is what this used to do — creates
+  // a window in which there is no index.html at all, and if the copy then fails
+  // the window is not a window, it is the state. The launcher entry still points
+  // the whole application here, so that state is an application that will not
+  // open, left behind by a plugin whose only job was to show some numbers.
+  //
+  // A rename within one filesystem is atomic, so a reader sees the old copy or
+  // the new one. Replacing a directory needs two renames — the old one out, the
+  // new one in — and the gap between them is a single pair of syscalls wide
+  // rather than a whole copy. A request that did land in it is answered by
+  // ensureCopy above rather than by a 404, which is what the two changes are for.
+  const staging = `${RENDERER_DIR}.new`
+  const retired = `${RENDERER_DIR}.old`
   try {
-    rmSync(RENDERER_DIR, { recursive: true, force: true })
-    if (!copyTree(asar, ["out", "renderer"], RENDERER_DIR)) {
+    rmSync(staging, { recursive: true, force: true })
+    if (!copyTree(asar, ["out", "renderer"], staging)) {
+      rmSync(staging, { recursive: true, force: true })
       return { ok: false, reason: "the app's index.html no longer loads a module bundle this can sit beside" }
     }
-    copyFileSync(READOUT_SCRIPT, join(RENDERER_DIR, "vitals.js"))
-    writeFileSync(join(RENDERER_DIR, MARKER), JSON.stringify(stamp))
+    copyFileSync(READOUT_SCRIPT, join(staging, "vitals.js"))
+    writeFileSync(join(staging, MARKER), JSON.stringify(stamp))
+
+    if (existsSync(RENDERER_DIR)) {
+      rmSync(retired, { recursive: true, force: true })
+      renameSync(RENDERER_DIR, retired)
+    }
+    try {
+      renameSync(staging, RENDERER_DIR)
+    } catch (error) {
+      // The new copy could not be moved in, so the old one goes back rather than
+      // being left renamed out of the way. A stale readout beats no application.
+      if (existsSync(retired) && !existsSync(RENDERER_DIR)) renameSync(retired, RENDERER_DIR)
+      throw error
+    }
+    rmSync(retired, { recursive: true, force: true })
     return { ok: true, changed: true, ...stamp }
   } catch (error) {
+    rmSync(staging, { recursive: true, force: true })
     return { ok: false, reason: `could not write ${RENDERER_DIR}: ${String(error)}` }
   }
 }
@@ -441,8 +517,22 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
     // against a deeper path. A miss is a real 404 and never index.html: a .js
     // answered with text/html is rejected on MIME type and the app breaks.
     const name = pathname.split("/").pop()
-    const direct = join(RENDERER_DIR, pathname)
-    const found = fileExists(direct) ? direct : [join(RENDERER_DIR, name), join(RENDERER_DIR, "assets", name)].find(fileExists)
+    const find = () => {
+      const direct = join(RENDERER_DIR, pathname)
+      return fileExists(direct) ? direct : [join(RENDERER_DIR, name), join(RENDERER_DIR, "assets", name)].find(fileExists)
+    }
+    let found = find()
+    // A miss is rebuilt once, here, rather than answered.
+    //
+    // This server is not a side channel. The launcher entry points the whole
+    // application at it, so a 404 is not a missing picture, it is an application
+    // that will not start. Anything that can empty that directory — an
+    // uninstall while OpenCode is open, a `rm -rf`, a failed sync, a tmp
+    // reaper — would otherwise be a window that stays broken until the next
+    // ten-minute tick, and broken for good if the rebuild is what failed.
+    // Rebuilding here makes the cause of the failure irrelevant: the request
+    // that would have been a 404 is the request that repairs it.
+    if (!found) found = ensureCopy() ? find() : null
     if (found) {
       response.writeHead(200, { "Content-Type": TYPES[found.slice(found.lastIndexOf("."))] ?? "application/octet-stream", "Cache-Control": "no-store" })
       createReadStream(found).pipe(response)

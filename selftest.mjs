@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Can this machine show the readout?
 //
-// It used to answer a different question — is there a Python with tkinter, so
-// the bar can draw — which meant a launcher, a probe interpreter and a Python
-// file in the package. The readout is drawn by OpenCode's own window now, so the
-// question is whether the app is here, whether its renderer can be copied, and
-// whether this plugin is the one serving the numbers.
+// It used to answer a different question — is there a Python with tkinter, so a
+// window could be drawn — which meant a launcher, a probe interpreter and a
+// Python file in the package. The readout is drawn by OpenCode's own window now,
+// so the question is whether the app is here, whether its renderer can be read,
+// and whether this plugin is the one serving the numbers.
 //
 // Answering it without starting anything: every check below reads a file or asks
 // this process what it already knows.

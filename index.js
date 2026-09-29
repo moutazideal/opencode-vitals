@@ -8,9 +8,13 @@ import { installDesktopEntry, removeDesktopEntry, rendererReady, serve, syncRend
 import { START_DELAY_MS, updateIfNeeded } from "./update.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
-// The status directory and the OPENCODE_LATENCY_* variables keep the name this
-// plugin had before it was called opencode-vitals. Renaming them here would
-// orphan every measurement file an installed copy has already written.
+// The status directory keeps the name this plugin had before it was called
+// opencode-vitals. Renaming it here would orphan every measurement file an
+// installed copy has already written. The OPENCODE_LATENCY_* variables this
+// comment used to claim to preserve have not existed for some time, and the
+// README documented them for just as long — a variable that is only named in a
+// comment and a manual is indistinguishable from one that works until somebody
+// tries it.
 // PLUGIN_ID only ever appears in a log line, so it carries the name people
 // actually recognise.
 const STORAGE_KEY = "history-v2"
@@ -59,7 +63,7 @@ const companions = globalThis[COMPANIONS_KEY] ?? (globalThis[COMPANIONS_KEY] = {
 // window, so there is no second process to own anything; the name is kept out of
 // the code entirely and a stale lock from an older copy is simply ignored.
 const PLUGIN_VERSION_FILE = join(STATUS_DIR, "plugin-version.json")
-// How many recent responses the bar averages for its "last 10" reading. The
+// How many recent responses the readout averages for its "last 10" reading. The
 // session average answers "is this session fast"; this answers "was the work I
 // just watched fast", which is the question a long session's average stops
 // being able to answer.
@@ -283,7 +287,7 @@ async function notePluginVersion() {
   }
   // The bar marks an announcement as seen in this same file. Carrying the
   // marker over keeps a second instance of the plugin from resurrecting a notice
-  // the bar has already shown.
+  // the readout has already shown.
   if (Number.isFinite(previous?.seenAt)) payload.seenAt = previous.seenAt
   await writeJsonAtomic(PLUGIN_VERSION_FILE, payload).catch(() => {})
   return { version, changed: true, previous: known }
@@ -432,7 +436,7 @@ function normalizeOptions(raw) {
     enabled: raw?.enabled !== false,
     historyLimit,
     // Off by default: one line per completed turn in somebody else's log file
-    // is noise, and the numbers are on the bar. Errors and version changes are
+    // is noise, and the numbers are on the readout. Errors and version changes are
     // printed whatever this says.
     log: raw?.log === true,
     popup,
@@ -680,7 +684,7 @@ function createState(rawOptions, context = {}) {
 
   // One entry per project. This file used to hold a single session, so the last
   // OpenCode instance on the machine to publish won it, and its numbers were
-  // shown under whichever project the bar belonged to. Each instance now writes
+  // shown under whichever project the session belonged to. Each instance now writes
   // only its own key and merges the rest, so a bar can ask for its project.
   // The session on screen, held in memory. It used to be published to a file,
   // because a separate process had to be told; the readout is asked directly now,
@@ -724,7 +728,7 @@ function createState(rawOptions, context = {}) {
     } catch {
       // No totals file yet (or it is unreadable): history alone is what there is.
     }
-    // Publish what was just rebuilt, so the bar gets the merged view — including
+    // Publish what was just rebuilt, so the readout gets the merged view — including
     // the last-ten list history supplied — without waiting for a new response.
     void publishSessionTotals().catch(() => {})
   }
@@ -745,7 +749,7 @@ function createState(rawOptions, context = {}) {
       subagentSteps: 0,
       project,
       tokensPerSecond: null,
-      // The rates of the most recent responses, oldest first, so the bar can
+      // The rates of the most recent responses, oldest first, so the readout can
       // average the last ten instead of the whole session. A response without a
       // rate contributes nothing rather than a zero.
       recentRates: [],
@@ -1244,7 +1248,7 @@ function createState(rawOptions, context = {}) {
 
   // OpenCode runs setup once per project directory, so several instances of this
   // plugin share one totals file. Writing only what this instance knows would
-  // erase the other projects' sessions from the file the bar reads, so the
+  // erase the other projects' sessions from the file the readout reads, so the
   // on-disk sessions are merged in first and the newest snapshot per session
   // wins whole.
   async function publishSessionTotals() {
@@ -1422,7 +1426,7 @@ function createState(rawOptions, context = {}) {
     }
     await persist(record)
     // Written after the credit above, so the parent this record delegated to is
-    // in the file the bar reads and not only in memory until the next turn.
+    // in the file the readout reads and not only in memory until the next turn.
     if (options.popup) void publishSessionTotals().catch(() => {})
     log(
       ctx,

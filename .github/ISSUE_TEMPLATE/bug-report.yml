@@ -11,19 +11,46 @@ body: |
 
   - operating system and version:
   - OpenCode version:
-  - Python version (`python3 --version`):
+  - Node version (`node --version`):
 
   ## Selftest output
 
-  This is the fastest way to see why. Please paste the whole thing.
+  This is the fastest way to see why. Please paste the whole thing. It writes
+  nothing.
 
   ```bash
-  npx opencode-vitals-selftest
+  npx opencode-vitals@latest selftest
   ```
 
   ```
   (paste here)
   ```
+
+  ## What is installed
+
+  If the readout is not appearing at all, this says which of the two shapes is
+  installed and whether it can update itself:
+
+  ```bash
+  npx opencode-vitals@latest status
+  opencode plugin list
+  ```
+
+  ```
+  (paste here)
+  ```
+
+  ## If OpenCode will not start
+
+  The plugin points the app's launcher at a local server, so if that server has
+  nothing to serve the window comes up empty. One command undoes it, and is safe
+  to run before reporting anything:
+
+  ```bash
+  rm -f ~/.local/share/applications/ai.opencode.desktop.desktop
+  ```
+
+  Please say in the report whether you ran it, and whether the app opened after.
 
   ## Please do not paste conversation text
 

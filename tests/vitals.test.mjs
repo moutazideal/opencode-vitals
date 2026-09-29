@@ -637,6 +637,32 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("privacy says how often", /once every six hours/.test(privacy))
   check("privacy says how to turn it off", /--no-update/.test(privacy) && /OPENCODE_VITALS_NO_UPDATE/.test(privacy))
   check("and makes no blanket no-network claim", !/no network code at all/.test(readme) && !/network calls: none/.test(readme))
+  // Every variable the page names has to exist. Three of them were documented for
+  // a long time after the code stopped reading them, which is the failure mode
+  // here: a variable that is only in the manual and a comment is indistinguishable
+  // from one that works, right up until somebody sets it and nothing happens.
+  const shipped = ["index.js", "readout.mjs", "install.mjs", "cli.mjs", "selftest.mjs", "update.mjs", join("renderer", "vitals.js")]
+  const source = shipped.map((file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8")).join("\n")
+  const documented = new Set([...readme.matchAll(/`(OPENCODE_[A-Z_]+|XDG_[A-Z_]+|TMPDIR)`/g)].map((match) => match[1]))
+  check("the page names a few variables to check", documented.size >= 4, String(documented.size))
+  // TMPDIR is read by Node's tmpdir(), not by us, which is why the page names it
+  // as the mechanism rather than as something this code looks at directly.
+  const viaPlatform = { TMPDIR: "tmpdir(" }
+  for (const name of documented) {
+    check(`${name} is documented and real`, source.includes(`process.env.${name}`) || source.includes(`${name}`) || source.includes(viaPlatform[name] ?? "\u0000"), name)
+  }
+  check("and no variable is documented that the code never mentions", ![...documented].some((name) => /LATENCY/.test(name)), [...documented].join(" "))
+  // "macOS and Windows expected" is how this table drifted: expected is a
+  // prediction wearing a plan's clothes, and a reader cannot tell it from tested.
+  // The claim this makes instead is a claim about what has been written, so it
+  // can only be kept honest by saying the unfinished part is unfinished.
+  check("the page says Linux only rather than promising other platforms", /Linux only/.test(readme))
+  check("and the badge says so too", /platform-Linux%20only/.test(readme))
+  const platforms = readme.slice(readme.indexOf("## Platform support"), readme.indexOf("## Options"))
+  check("the platform table marks the other two as not written", /not written/.test(platforms), platforms.slice(0, 60))
+  check("it does not call them expected anywhere", !/macOS[^\n]*expected|Windows[^\n]*expected/.test(platforms))
+  check("and it says why, in the mechanism rather than a promise", /ELECTRON_RENDERER_URL/.test(platforms) && /\.desktop/.test(platforms))
+  check("and it is honest that they will measure without showing", /measure your sessions correctly and show you nothing/.test(platforms))
   // The window it draws in has a launcher entry pointed at it. Saying so is part
   // of the same claim: what this plugin changes on your machine.
   check("privacy says the launcher entry it writes and when", /launcher entry is written/.test(privacy) && /Uninstalling removes it/.test(privacy))
@@ -1153,7 +1179,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
 // 46. A restart resumes from the totals file, not only from a capped history.
 // History keeps twenty records across all sessions, so a plugin that rebuilt
 // its view from that alone came back behind the totals it had already
-// published — and the bar kept showing the older snapshot, last-ten list and
+// published — and the readout kept showing the older snapshot, last-ten list and
 // all, until the rebuilt count caught up.
 {
   const resumeSession = `ses_resume${unique}`

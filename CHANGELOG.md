@@ -21,12 +21,16 @@ again.
   speed the same session was reporting, which is the one thing this plugin
   exists not to do.
 
-  Its numerator was also missing a term its own denominator included: the time
-  the model spends writing a tool call's arguments is streaming time, so it is in
-  the denominator, and the characters of those arguments were not in the
-  numerator. So the figure dipped every time the model called a tool, for a reason
-  that had nothing to do with speed — and it disagreed with this codebase's own
-  character-based measure, which does include them.
+  Its numerator was also missing a term its own denominator included. The time
+  the model spends writing a tool call's arguments is streaming time, so it was
+  in the denominator, and the characters of those arguments were not in the
+  numerator — which is why the figure dipped every time the model called a tool,
+  for a reason that had nothing to do with speed. It also disagreed with this
+  codebase's own character-based measure, which does include them: the live
+  figure counted `characterCount + reasoningCharacterCount`, and the settled
+  record's `observedCharactersPerSecond` counted `characterCount +
+  toolArgCharacters`. Two rates, both called characters per second, off by
+  whatever the model spent writing tools.
 
   A labelled version would have fixed the unit and left a row carrying two
   different quantities. A token rate could not be produced mid-flight at all
@@ -53,6 +57,16 @@ again.
 
 ### Documentation
 
+- **"macOS and Windows expected" is now "Linux only".** Expected is a prediction
+  wearing a plan's clothes, and a reader cannot tell it from tested. The plugin
+  installs and measures on any platform — that part is plain Node with no OS calls
+  in it — but the file that starts OpenCode pointed at the readout is a
+  `.desktop` entry, and macOS and Windows have no such convention to copy. So on
+  those two this measures your sessions correctly and shows you nothing, and the
+  page now says exactly that instead of implying a plan it does not have. The
+  screenshots, the badge, and the platform table all agree, and a check keeps
+  them agreeing.
+
 - **"This plugin has no network code at all. No registry calls, no update pings."
   That stopped being true in 0.1.9.** A privacy claim one release behind the code
   is worse than no claim, because it is believed. The page now names the one host
@@ -68,10 +82,22 @@ again.
   being undone.
 - The screenshots are named for what they show. `docs/bar.png` was a picture of
   a composer.
+- The issue templates asked for a Python version, which this project has not used
+  since 0.1.8, and told people to run a bin name that the page no longer prints.
+  Both templates now use the documented command, and the bug report asks for what
+  is actually decisive when the readout does not appear: `status`, `plugin list`,
+  and whether removing the launcher entry lets OpenCode open.
+- `OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_TOTALS_FILE` and
+  `OPENCODE_LATENCY_VERSION_FILE` were documented in the page and named in a
+  comment in the code, and have not been read by this package for some time. The
+  status directory follows `TMPDIR`, which is what the page says now. Every
+  variable the page names is checked against the code, because a variable that
+  exists only in a manual and a comment is indistinguishable from one that works
+  until somebody sets it and nothing happens.
 
 ### Measured
 
-- 380 checks, up from 373. The removed feature took its checks with it, and what
+- 392 checks, up from 373. The removed feature took its checks with it, and what
   replaced them is the property that matters: a response carries the session and
   its totals and nothing else, and a payload that still arrives with a
   provisional figure is drawn without it.

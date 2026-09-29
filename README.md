@@ -6,7 +6,7 @@
   turns, steps, the average streaming tokens per second, and the average of the last ten
   responses beside it.</p>
   <p>
-    <img alt="platform: Linux verified, macOS and Windows expected" src="https://img.shields.io/badge/platform-Linux%20verified%20%7C%20macOS%20%2B%20Windows%20expected-2ea44f">
+    <img alt="platform: Linux only for now" src="https://img.shields.io/badge/platform-Linux%20only%20%E2%80%94%20macOS%20%26%20Windows%20coming%20soon-d93f0b">
     <img alt="dependencies: none" src="https://img.shields.io/badge/dependencies-none-2ea44f">
     <img alt="network: the npm registry, for update checks only, opt out with --no-update" src="https://img.shields.io/badge/network-npm%20registry%2C%20updates%20only-2ea44f">
     <img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-8b5cf6">
@@ -56,6 +56,15 @@ it ended up with, so "installed" and "installed the right one" are two separate 
 which happened.
 
 **3 — Restart OpenCode.** The numbers appear in the composer the next time you open it.
+
+> **Linux only, for now.** The readout is drawn by OpenCode's own window, and getting the app to draw
+> from a different copy of its interface means starting it with `ELECTRON_RENDERER_URL` set. On Linux
+> that is a `.desktop` entry, which is the piece this project writes — a format macOS and Windows do
+> not have. Everything else here is portable: the measurement, the server, the injection, the update
+> check, the uninstall. It is the launcher that is missing, not the rest. On those platforms the
+> plugin still installs, still measures and still serves the numbers over HTTP, and the one thing it
+> cannot do is make the application load them. That is what "coming soon" means: one file per
+> platform, written the way `.desktop` is written here. See [Platform support](#platform-support).
 
 ### Let OpenCode keep the plugin up to date
 
@@ -150,7 +159,7 @@ If you install a copy instead (`--copy`, or a folder you put in `plugins/` yours
 nothing can ever update it: `opencode plugin list` cannot see it and `opencode plugin update` does
 not know it exists. `npx opencode-vitals@latest status` says which shape you have.
 
-### Updates
+### What installing prints
 
 When OpenCode finds a newer release, it does not apply it — swapping the code under a running process
 is not something a host should do quietly. This plugin does that half. A few seconds after OpenCode
@@ -158,8 +167,19 @@ starts it looks for a newer version, and if there is one it hands the work to Op
 and prints:
 
 ```
-opencode-vitals 0.1.8 → 0.1.9: installed. Restart OpenCode to run it.
+registered opencode-vitals with OpenCode (/home/you/.config/ai.opencode.desktop/cli/2.0.19/opencode-cli)
+OpenCode has 0.1.11
+OpenCode checks it for updates on every start.
+This plugin applies an update it finds and tells you to restart.
+
+Restart OpenCode. The numbers appear in the composer.
 ```
+
+The second line is the one worth reading. It is the version OpenCode says it has,
+asked for rather than inferred: the updater's own exit code does not mean what it
+looks like it means, and on some builds it reports a failure for an update that
+succeeded. If that line names a version older than the one being installed, the
+install registered the plugin and did not move it, and it says so.
 
 So you never run an update command, and you never get a new version silently either: the log says
 what changed and that a restart is what starts it. A restart is not optional and cannot be faked —
@@ -295,14 +315,33 @@ checked:
 | | Linux | macOS | Windows |
 | --- | --- | --- | --- |
 | Measurement core | **tested** | same code, no OS calls | same code, no OS calls |
-| Readout in the composer | **tested** — 2.0.19 on GNOME/Mutter, X11 | expected — the app's own UI | expected — the app's own UI |
-| Finds the installed app | **tested** — `/opt/OpenCode/resources/app.asar` | `/Applications/OpenCode.app/…` | `C:/Program Files/OpenCode/…` |
-| Launcher entry | **tested** — copied from the system `.desktop` | same convention | the Start-menu entry is not replaced |
+| Readout in the composer | **tested** — 2.0.19 on GNOME/Mutter, X11 | **not written** | **not written** |
+| Finds the installed app | **tested** — `/opt/OpenCode/resources/app.asar` | guessed — untested | guessed — untested |
+| Launcher entry | **tested** — copied from the system `.desktop` | **not written** | **not written** |
+| Installs and measures | **tested** | will work, untested | will work, untested |
 
-**Only the Linux column has run on real hardware.** The app is packaged
-differently on every platform, so the paths it is looked for at are ordinary
-guesses — and a wrong guess is reported rather than worked around. Run the
-selftest on your machine and you will know in a few seconds:
+**The honest state: macOS and Windows are unfinished, not untested-but-fine.** The
+plugin installs and measures on any platform — that part is plain Node with no
+operating-system calls in it. What does not exist yet is the file that starts
+OpenCode pointed at the readout.
+
+That file is the whole of the difference. Getting the app to draw from a copy of
+its own interface means starting it with `ELECTRON_RENDERER_URL` set, and on
+Linux that is a `.desktop` entry, which is what `readout.mjs` writes: a copy of
+the system's own entry with `Exec` changed. macOS has no such convention and
+Windows has a different one, so there is nothing to copy on either. Everything
+downstream of that file — the copy of the renderer, the injection, the local
+server, the update check, the uninstall — is written and tested here and has no
+platform assumption in it.
+
+So the work to do is one launcher per platform, and until it exists, on macOS
+and Windows this plugin will measure your sessions correctly and show you nothing.
+
+**Nothing above is a guess about behaviour; it is a statement about what has been
+run.** The paths in the app-discovery row are real guesses: the app is packaged
+differently everywhere, and a wrong one is reported rather than worked around.
+Run the selftest on your own machine and you will know in a second — it writes
+nothing:
 
 ```bash
 npx opencode-vitals@latest selftest    # after installing from npm
@@ -356,9 +395,8 @@ Environment variables, for the curious:
 | `OPENCODE_VITALS_DIR` | `~/.local/share/opencode-vitals` | Where the copy of the app's renderer is kept. |
 | `OPENCODE_DESKTOP_APP` | detected | Point this at a specific `app.asar` when the app is somewhere unusual. An explicit value is the whole answer, not the first of several guesses. |
 
-The status files (`OPENCODE_LATENCY_FILE`, `OPENCODE_LATENCY_TOTALS_FILE`,
-`OPENCODE_LATENCY_VERSION_FILE`) exist so the measurement can be run against an isolated directory —
-the test suite uses them — and rarely need to be set by hand.
+The status directory itself follows `TMPDIR`, which is how the test suite runs against an isolated one
+rather than the real `/tmp`.
 
 ## Privacy
 

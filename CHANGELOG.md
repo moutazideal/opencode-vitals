@@ -4,6 +4,78 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12] - 2026-10-03
+
+The readout stops taking itself away from other projects, and the numbers it
+shows are the ones that happened.
+
+### Fixed
+
+- **Cleaning up one project's plugin instance closed the readout for all of
+  them.** `readoutServer` is one server for the machine, shared by the instance
+  OpenCode loads per project, and every instance's cleanup closed it
+  unconditionally. Closing a window left the other open projects with a row that
+  never came back, because nothing starts the server again until that project
+  reloads. The instance now leaves the pool first, and the socket is closed only
+  by the last one to go.
+- **A file that vanished between the stat and the read crashed the plugin host.**
+  The server pipes the copy of the app's interface straight to the response, and
+  a read stream with no error handler turns a deleted asset into an uncaught
+  exception — in the process that also measures. The stream now has a handler: a
+  plain 503 before the headers, the connection closed after them, never a crash.
+- **Two responses that ran at the same speed became one in the last-ten list.**
+  The list dropped a rate that equalled the one before it, on the theory that a
+  replay had arrived twice. Replays are refused earlier, so the only thing that
+  rule could catch was a real response whose speed coincided with its
+  neighbour's — and it made the last-ten mean a mean of nine.
+- **Publishing the session totals could lose another project's session.** The
+  read-merge-write took no lock, while `persist` took one for exactly that
+  reason; two instances finishing a turn at once could each write over the
+  other. It now takes the same lock.
+- **An app update that changed a bundle without changing the asar's size went
+  unnoticed.** The fingerprint walked only the top level of `out/renderer` and
+  skipped directories, and the app's own bundles live one level down in
+  `assets/`. It now hashes every file at every depth, name and content.
+- **A failed update was written off until a newer version appeared.** The latch
+  recorded the version as attempted whether the update worked or not, so a
+  transient failure — a moment offline, a busy registry — was never retried. Only
+  success is recorded as attempted now; a failure is retried after the check
+  interval.
+- **The updater ran `process.execPath`.** On the desktop host that is the
+  Electron application, and only some builds answer `plugin update`. The CLI the
+  app ships is preferred when it can be found, with `process.execPath` as the
+  fallback.
+- **The status report was a heartbeat, not a state change.** A composer whose
+  slot was missing sent the diagnostic to the server every second for as long as
+  it was missing. It is sent on the first failure and on the recovery.
+- **A poll with no deadline could hang the readout.** A server that accepted the
+  connection and never answered left the fetch pending forever, so `misses` never
+  grew and a dead row could never be withdrawn. The poll has a deadline.
+- **A plugin registered only in `opencode.jsonc` was reported as not
+  registered** when an `opencode.json` also existed, because the config was read
+  only until the first file that existed. Both files are read before the answer.
+- **A host with no `HOME` crashed the readout module on import**, before any of
+  its best-effort guards could run. The fallback is an empty string, as it
+  already was in the updater.
+- **`install --dir` with no path silently used the default**, and `status`
+  created the plugin directory it was only reporting on. Both are fixed.
+- The selftest printed a renderer it could not read under the label for one it
+  found.
+
+### Changed
+
+- The test suite covers the readout's own invariants now: one server shared by
+  many instances and the cleanup that must not close it, an asset that vanishes
+  mid-request, two responses with the same rate, a fingerprint over `assets/`,
+  the stale lock holder, a failed update retried, and both config files. Three
+  claims in the page that described tests from the window era — a WAL timestamp,
+  a fake process list for macOS and Windows, a window covering OpenCode — are
+  gone, and the check count is checked against the suite instead of remembered.
+
+### Measured
+
+- 419 checks, up from 400.
+
 ## [0.1.11] - 2026-09-29
 
 The number that moves is gone, and the page that describes this plugin is true

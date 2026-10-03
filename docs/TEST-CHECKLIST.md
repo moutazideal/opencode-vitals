@@ -207,9 +207,10 @@ already looks after. What replaced the concern is the copy, and that is §7.
 Run with `npm test`. These do not replace the sheet above; they cover the
 arithmetic and the guards, not how the app behaves.
 
-- 215 checks in one suite: event accounting, totals, snapshot ranking, storage
+- 419 checks in one suite: event accounting, totals, snapshot ranking, storage
   locking, subagent credit, the asar reader, the injection, the launcher entry,
-  the numbers the readout is actually served, and the README's own commands.
+  one server shared by many instances, the numbers the readout is actually
+  served, and the README's own commands.
 
 ---
 
@@ -231,9 +232,11 @@ they are decisions rather than surprises.
 4. **Sessions are capped in the totals file.** Beyond the cap, the least recently
    updated session is dropped, so an old tab can show a dash rather than its
    history. Correct, but surprising if you did not expect it.
-5. **`latest.json` is one file for the machine.** Several OpenCode instances
-   write it; whoever wrote last wins. It is a convenience record, not the
-   source of truth — the totals file is.
+5. **`session-totals.json` is one file for the machine.** Several OpenCode
+   instances share it and each writes only the sessions it knows; the storage
+   lock serializes the read-merge-write, so no update is lost, but a session the
+   cap evicts is gone from it. (Older releases also wrote `latest.json` and
+   `current-session.json`, which an upgrade still cleans up.)
 6. **The plugin has no `sandbox` of its own.** It runs with the user's
    privileges, like every OpenCode plugin. Nothing in this design may be allowed
    to assume otherwise.
@@ -242,3 +245,7 @@ they are decisions rather than surprises.
 8. **The readout needs the desktop app.** There is no TUI equivalent. On a
    machine that only runs the terminal interface the numbers are still measured
    and still written, and nothing shows them; that is a design limit, not a bug.
+9. **The fingerprint reads the whole renderer.** It covers every file under
+   `out/renderer`, including the bundles in `assets/`, so an unchanged app costs
+   a full read and hash every ten minutes. That is the price of noticing an
+   update that changes a bundle without changing the asar's size.

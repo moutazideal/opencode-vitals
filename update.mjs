@@ -149,35 +149,53 @@ export async function latestPublished({ registry = DEFAULT_REGISTRY, name = PLUG
   }
 }
 
+// The binary that should run OpenCode's own updater. On the desktop host
+// `process.execPath` is the Electron application, and only some builds answer
+// `plugin update`; the CLI the app ships is the better answer when one can be
+// found. `cli` is the other way in, for a caller that already knows.
+async function findUpdaterBinary() {
+  try {
+    // Lazy, because install.mjs imports this module and the cycle must stay
+    // dynamic rather than at module-evaluation time.
+    const { findOpenCodeCli } = await import("./install.mjs")
+    return findOpenCodeCli() ?? process.execPath
+  } catch {
+    return process.execPath
+  }
+}
+
 // Hand the swap to OpenCode. Its own updater, its own view of what is installed,
 // its own idea of where packages live — ours is only the argument.
-export function applyUpdate({ cli = process.execPath, name = PLUGIN_NAME, timeoutMs = APPLY_TIMEOUT_MS, spawn: run = spawn } = {}) {
+export function applyUpdate({ cli, name = PLUGIN_NAME, timeoutMs = APPLY_TIMEOUT_MS, spawn: run = spawn } = {}) {
   return new Promise((resolve) => {
-    let child
-    try {
-      child = run(cli, ["plugin", "update", name], { stdio: ["ignore", "pipe", "pipe"] })
-    } catch (error) {
-      resolve({ ok: false, reason: String(error) })
-      return
-    }
-    // Captured rather than inherited: this output belongs in the plugin's own
-    // log line if anything went wrong, not interleaved into the service's.
-    let output = ""
-    child.stdout?.on("data", (chunk) => { output += chunk })
-    child.stderr?.on("data", (chunk) => { output += chunk })
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL")
-      resolve({ ok: false, reason: `opencode plugin update did not finish in ${Math.round(timeoutMs / 1000)}s` })
-    }, timeoutMs)
-    timer.unref?.()
-    child.on("error", (error) => {
-      clearTimeout(timer)
-      resolve({ ok: false, reason: String(error) })
-    })
-    child.on("close", (code) => {
-      clearTimeout(timer)
-      resolve(code === 0 ? { ok: true } : { ok: false, reason: output.trim().split("\n").slice(-3).join(" ") || `exited ${code}` })
-    })
+    void (async () => {
+      const binary = cli ?? (await findUpdaterBinary())
+      let child
+      try {
+        child = run(binary, ["plugin", "update", name], { stdio: ["ignore", "pipe", "pipe"] })
+      } catch (error) {
+        resolve({ ok: false, reason: String(error) })
+        return
+      }
+      // Captured rather than inherited: this output belongs in the plugin's own
+      // log line if anything went wrong, not interleaved into the service's.
+      let output = ""
+      child.stdout?.on("data", (chunk) => { output += chunk })
+      child.stderr?.on("data", (chunk) => { output += chunk })
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL")
+        resolve({ ok: false, reason: `opencode plugin update did not finish in ${Math.round(timeoutMs / 1000)}s` })
+      }, timeoutMs)
+      timer.unref?.()
+      child.on("error", (error) => {
+        clearTimeout(timer)
+        resolve({ ok: false, reason: String(error) })
+      })
+      child.on("close", (code) => {
+        clearTimeout(timer)
+        resolve(code === 0 ? { ok: true } : { ok: false, reason: output.trim().split("\n").slice(-3).join(" ") || `exited ${code}` })
+      })
+    })()
   })
 }
 
@@ -224,11 +242,16 @@ export async function considerUpdate({
     return { action: "current", latest }
   }
   const applied = await applyUpdate({ cli, name, spawn: run })
-  // The latch is written whether it worked or not. A registry that offers a
-  // version the machine cannot install would otherwise be retried on every
-  // single launch, and a failing subprocess per launch is a slow way to be
-  // polite.
-  if (latchFile) writeLatch(latchFile, { ...seen, checkedAt: now, latest, attempted: version })
+  // Success is what `attempted` records: "this version is installed and waiting
+  // for a restart" is the only reason not to ask again. A failure is remembered
+  // through `checkedAt` alone, so a transient one — a momentary network failure,
+  // a registry that was busy — is retried after the check interval instead of
+  // being written off until a newer version is published.
+  if (latchFile) {
+    writeLatch(latchFile, applied.ok
+      ? { ...seen, checkedAt: now, latest, attempted: version }
+      : { ...seen, checkedAt: now, latest })
+  }
   return applied.ok
     ? { action: "installed", latest, version }
     : { action: "failed", latest, version, reason: applied.reason }

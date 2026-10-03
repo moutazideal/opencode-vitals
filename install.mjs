@@ -340,6 +340,11 @@ export function resolvePluginsDir({ env = process.env, home = homedir() } = {}) 
 // and the command only runs when there is something for it to do.
 export function isRegistered({ name = "opencode-vitals", env = process.env, home = homedir() } = {}) {
   const configRoot = env.XDG_CONFIG_HOME || join(home, ".config")
+  // Both files are read before answering. A machine can have one of each, and
+  // returning on the first file that exists reported a plugin registered only in
+  // opencode.jsonc as not registered — after which the next install ran
+  // `plugin add` against a config that already listed it.
+  let fallback = { registered: false, file: null, entries: [] }
   for (const file of ["opencode.json", "opencode.jsonc"]) {
     let body
     try {
@@ -355,10 +360,11 @@ export function isRegistered({ name = "opencode-vitals", env = process.env, home
     // The documented control syntax: a leading `-` disables a plugin, and a later
     // entry re-enables one. A disable is not a registration to remove.
     const enabled = entries.filter((entry) => !entry.startsWith("-"))
-    if (enabled.includes(name) || entries.includes(`-${name}`)) return { registered: true, file, entries }
-    return { registered: false, file, entries }
+    const found = { registered: enabled.includes(name) || entries.includes(`-${name}`), file, entries }
+    if (found.registered) return found
+    if (fallback.file === null) fallback = found
   }
-  return { registered: false, file: null, entries: [] }
+  return fallback
 }
 
 function targetName(manifest) {
@@ -649,7 +655,9 @@ function parseArgs(argv) {
     else if (argument === "--status") options.action = "status"
     else if (argument === "--help" || argument === "-h") options.action = "help"
     else if (argument === "--dir") {
-      options.dir = argv[index + 1] ?? null
+      const value = argv[index + 1]
+      if (value === undefined) throw new Error("--dir needs a path")
+      options.dir = value
       index += 1
     } else if (argument.startsWith("--dir=")) options.dir = argument.slice("--dir=".length)
     else throw new Error(`unknown argument: ${argument}`)
@@ -666,7 +674,9 @@ function main(argv) {
 
   const manifest = readManifest()
   const pluginsDir = options.dir ? resolve(options.dir) : resolvePluginsDir()
-  mkdirSync(pluginsDir, { recursive: true })
+  // `status` only reports on the install; it does not get to create the directory
+  // it is reporting on.
+  if (options.action !== "status") mkdirSync(pluginsDir, { recursive: true })
 
   if (options.action === "status") {
     const report = status({ pluginsDir })

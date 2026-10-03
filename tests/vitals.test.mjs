@@ -3,7 +3,8 @@ import * as vm from "node:vm"
 import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, utimesSync, statSync, lstatSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { createServer } from "node:net"
+import { dirname, join } from "node:path"
 
 // The plugin resolves its status directory from the temporary directory when the
 // module is evaluated, so the whole suite gets a sandbox before the import.
@@ -20,8 +21,16 @@ mkdirSync(join(SUITE_TMP, "config", "opencode"), { recursive: true })
 // The readout binds a real socket, so the suite gets its own port rather than
 // fighting the developer's running instance for 8971. And it is pointed at an app
 // that does not exist, so a suite run never copies a 43MB renderer or writes a
-// launcher entry into the developer's home directory.
-const READOUT_PORT = 9200 + (process.pid % 300)
+// launcher entry into the developer's home directory. The port is asked for from
+// the kernel rather than guessed from the pid, so two suite runs cannot collide.
+const READOUT_PORT = await new Promise((resolve, reject) => {
+  const probe = createServer()
+  probe.on("error", reject)
+  probe.listen(0, "127.0.0.1", () => {
+    const { port } = probe.address()
+    probe.close(() => resolve(port))
+  })
+})
 process.env.OPENCODE_VITALS_PORT = String(READOUT_PORT)
 process.env.OPENCODE_DESKTOP_APP = join(SUITE_TMP, "no-such-app.asar")
 const { default: plugin, vitalsInternals } = await import("../index.js")
@@ -351,6 +360,9 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const cleanupA = await plugin.setup(makeContext(eventsA))
   const cleanupB = await plugin.setup(makeContext(eventsB))
   await waitForRecord(shared, (item) => item.sessionID === S_B)
+  // Both instances persist independently, so waiting only for the second leaves
+  // the first able to land after the read. Wait for both.
+  await waitForRecord(shared, (item) => item.sessionID === S_A)
   const records = shared.value?.records ?? []
   check("merge keeps old record", records.some((item) => item.id === "old"), JSON.stringify(records.map((item) => item.id)))
   check("merge keeps both sessions", records.filter((item) => item.sessionID?.startsWith("ses_merge")).length === 2, JSON.stringify(records.map((item) => item.sessionID)))
@@ -649,7 +661,10 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // as the mechanism rather than as something this code looks at directly.
   const viaPlatform = { TMPDIR: "tmpdir(" }
   for (const name of documented) {
-    check(`${name} is documented and real`, source.includes(`process.env.${name}`) || source.includes(`${name}`) || source.includes(viaPlatform[name] ?? "\u0000"), name)
+    // The variable has to be read, not merely mentioned: the old
+    // `source.includes(name)` alternative matched a comment as happily as
+    // `process.env`, which left the check unable to fail.
+    check(`${name} is documented and real`, source.includes(`process.env.${name}`) || source.includes(viaPlatform[name] ?? "\u0000"), name)
   }
   check("and no variable is documented that the code never mentions", ![...documented].some((name) => /LATENCY/.test(name)), [...documented].join(" "))
   // "macOS and Windows expected" is how this table drifted: expected is a
@@ -1498,8 +1513,9 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const dir = mkdtempSync(join(tmpdir(), "vitals-uninstall-"))
   const statusDir = join(dir, "opencode-latency-monitor")
   mkdirSync(statusDir, { recursive: true })
-  // Ours: the totals, the per-project current session, the last record, the
-  // version file, a legacy lock, and a couple of response markers.
+  // Ours: the totals, the version file, the update latch, response markers, and
+  // the files older releases wrote (a per-project current session, a last
+  // record, a lock) which an upgrade still has to clean up.
   for (const name of [
     "session-totals.json",
     "current-session.json",
@@ -1648,9 +1664,16 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     let tick = null
     let mutated = null
     const tabHref = { value: href }
+    // Whether the composer's action row is on screen. The app re-renders it away
+    // and renames its slot; a window with no row is the case the readout has to
+    // report and survive.
+    const slot = { present: true }
     const sandbox = {
       console,
       URLSearchParams,
+      // AbortSignal.timeout is used by the poll for its deadline, so the stub has
+      // to provide the global the real renderer has.
+      AbortSignal,
       setInterval: (fn) => { tick = fn; return { unref() {} } },
       MutationObserver: class {
         constructor(callback) { mutated = callback }
@@ -1665,7 +1688,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
           if (selector.includes("titlebar-tab-item")) {
             return { getAttribute: (key) => (key === "href" ? tabHref.value : null) }
           }
-          if (selector.includes("composer-actions")) return host
+          if (selector.includes("composer-actions")) return slot.present ? host : null
           return null
         },
         querySelectorAll: () => new Array(6).fill(element("div")),
@@ -1682,6 +1705,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
       host,
       asked,
       server,
+      slot,
       // The app re-renders its composer, which takes our node with it. This is
       // what the readout has to notice, and it is the only reason it polls and
       // observes at all.
@@ -1819,6 +1843,25 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     win.server.fail = true
     await win.poll()
     check("a window opened while the server is down is not a crash", win.host.children.length === 0, JSON.stringify(win.host.children.length))
+  }
+
+  // The status report is a state change, not a heartbeat. A composer that is
+  // missing reports once — the old latch sent it every second for as long as the
+  // slot was absent — and the recovery reports once too.
+  {
+    const win = mount()
+    win.server.payload = measured
+    win.slot.present = false
+    await win.poll()
+    const firstMissing = win.asked.filter((url) => url.includes("__vitals-status")).length
+    await win.poll()
+    await win.poll()
+    const stillMissing = win.asked.filter((url) => url.includes("__vitals-status")).length
+    check("a missing composer is reported once, not every tick", firstMissing === 1 && stillMissing === 1, JSON.stringify([firstMissing, stillMissing]))
+    win.slot.present = true
+    await win.poll()
+    const recovered = win.asked.filter((url) => url.includes("__vitals-status")).length
+    check("and the recovery is reported", recovered === 2, JSON.stringify(recovered))
   }
 }
 
@@ -2032,7 +2075,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
 // Keeping the install current. The decisions are pinned without a network, a
 // clock or a subprocess, because all three of those are the interesting part.
 {
-  const { compareVersions, considerUpdate, latestPublished, updatesDisabled, readInstall } = await import("../update.mjs")
+  const { compareVersions, considerUpdate, latestPublished, updatesDisabled, readInstall, CHECK_INTERVAL_MS } = await import("../update.mjs")
   // The writer of the opt-out lives with the installer, which is the only thing
   // that runs often enough to want it written or cleared.
   const { setUpdateDisabledMarker } = await import("../install.mjs")
@@ -2102,12 +2145,33 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("and the next launch does not do it again", afterInstall.action === "awaiting-restart" && ran.length === 1, JSON.stringify(afterInstall))
 
   // A registry that offers something the machine cannot install must not become
-  // a failing subprocess on every launch of the machine.
+  // a failing subprocess on every launch — but a failure is not a statement that
+  // the version can never be installed. It is remembered through the check time
+  // alone and retried after the interval, rather than being written off until a
+  // newer version is published.
   const brokenLatch = join(home, "broken.json")
   const beforeFailures = ran.length
   await considerUpdate({ version: "0.1.8", now: 40_000, fetch: ok, spawn: run(1, "npm ERR! 500\n"), cli: "/bin/opencode", latchFile: brokenLatch })
-  const retried = await considerUpdate({ version: "0.1.8", now: 41_000, fetch: ok, spawn: run(1, "npm ERR! 500\n"), cli: "/bin/opencode", latchFile: brokenLatch })
-  check("a failed update is not retried on every launch", ran.length === beforeFailures + 1 && retried.action === "awaiting-restart", `${ran.length - beforeFailures} ${JSON.stringify(retried)}`)
+  const soon = await considerUpdate({ version: "0.1.8", now: 41_000, fetch: ok, spawn: run(1, "npm ERR! 500\n"), cli: "/bin/opencode", latchFile: brokenLatch })
+  check("a failed update is not retried on every launch", ran.length === beforeFailures + 1 && soon.action === "recent", `${ran.length - beforeFailures} ${JSON.stringify(soon)}`)
+  const later = await considerUpdate({ version: "0.1.8", now: 40_000 + CHECK_INTERVAL_MS + 1, fetch: ok, spawn: run(1, "npm ERR! 500\n"), cli: "/bin/opencode", latchFile: brokenLatch })
+  check("but it is retried after the check interval", ran.length === beforeFailures + 2 && later.action === "failed", `${ran.length - beforeFailures} ${JSON.stringify(later)}`)
+
+  // The updater is OpenCode's own, run by the best binary for the job: the CLI
+  // the app ships when one can be found, with process.execPath as the fallback.
+  // `cli` is only one of the two ways that binary is chosen.
+  const cliHome = mkdtempSync(join(home, "cli"))
+  mkdirSync(join(cliHome, "bin"), { recursive: true })
+  const fakeCli = join(cliHome, "bin", "opencode")
+  writeFileSync(fakeCli, "#!/bin/sh\n")
+  const savedCliEnv = process.env.OPENCODE_CLI
+  process.env.OPENCODE_CLI = fakeCli
+  const chosen = []
+  const recordSpawn = (binary) => { chosen.push(binary); return childExit(0, "")() }
+  await considerUpdate({ version: "0.1.8", now: 50_000, fetch: ok, spawn: recordSpawn, latchFile: join(home, "chosen.json") })
+  check("the updater prefers the CLI the app ships over process.execPath", chosen.at(-1) === fakeCli, JSON.stringify(chosen))
+  if (savedCliEnv === undefined) delete process.env.OPENCODE_CLI
+  else process.env.OPENCODE_CLI = savedCliEnv
 
   // The switches.
   const marker = setUpdateDisabledMarker(true, { dataHome: home })
@@ -2272,7 +2336,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // A renderer that is not there yet: the first request is what repairs it, and
   // it is repaired before the answer rather than after it. Before this, a window
   // that reloaded in that state got a 404 and refused to open.
-  check("with no copy, the app's own page is not a 404", (await get("/index.html")).status === 200, JSON.stringify(await get("/index.html")).slice(0, 120))
+  const firstPage = await get("/index.html")
+  check("with no copy, the app's own page is not a 404", firstPage.status === 200, JSON.stringify(firstPage.status))
   check("and the copy now exists", rendererReady())
 
   // The report's reproduction: the data directory is emptied behind our back and
@@ -2296,7 +2361,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const started = Date.now()
   for (let request = 0; request < 12; request += 1) await get("/index.html")
   const elapsed = Date.now() - started
-  check("an unrecoverable copy is not rebuilt on every request", elapsed < 5_000, `${elapsed}ms for 12 requests`)
+  check("an unrecoverable copy is not rebuilt on every request", elapsed < 2_000, `${elapsed}ms for 12 requests`)
   // Two different failures for two different requests, and both are plain: the
   // document is a 503 because there is nothing to serve, and a named asset is a
   // 404 because that file is not there. Neither is a hang and neither is a page
@@ -2394,6 +2459,200 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   if (previousTmp === undefined) delete process.env.TMPDIR
   else process.env.TMPDIR = previousTmp
   rmSync(home, { recursive: true, force: true })
+}
+
+// One server for the machine, many plugin instances behind it. Cleaning up one
+// project's instance must not take the readout away from the others; only the
+// last instance to leave closes the socket.
+{
+  const a = await run([], { pluginOptions: { popup: true } })
+  const b = await run([], { pluginOptions: { popup: true } })
+  const alive = async () => {
+    try {
+      return (await fetch(`http://127.0.0.1:${READOUT_PORT}/vitals?session=ses_none`)).status
+    } catch {
+      return null
+    }
+  }
+  const both = await alive()
+  check("two instances are served by one server", both === 200, JSON.stringify(both))
+  a.cleanup()
+  await wait(100)
+  const afterFirst = await alive()
+  check("cleaning up one instance keeps the server for the others", afterFirst === 200, JSON.stringify(afterFirst))
+  b.cleanup()
+  await wait(150)
+  const afterLast = await alive()
+  check("cleaning up the last instance closes the server", afterLast === null, JSON.stringify(afterLast))
+}
+
+// A file that is gone by the time it is opened is an error on the read stream,
+// not an uncaught exception in the plugin host. The answer is a plain 503.
+{
+  const { serveAsset } = await import("../readout.mjs")
+  const response = {
+    headersSent: false,
+    code: null,
+    body: null,
+    destroyed: false,
+    writeHead(code) { this.headersSent = true; this.code = code; return this },
+    end(body) { this.body = body; return this },
+    destroy() { this.destroyed = true },
+    on() { return this },
+    once() { return this },
+    emit() { return true },
+  }
+  serveAsset(response, join(SUITE_TMP, "no-such-asset-xyz.js"))
+  await wait(60)
+  check("a vanished asset is answered, not thrown", response.code === 503 && response.destroyed === false, JSON.stringify({ code: response.code, body: response.body }))
+}
+
+// Two responses that ran at the same speed are two responses. The last-ten list
+// used to drop the second because its rate equalled the first's.
+{
+  const equalSession = `ses_eqrate${unique}`
+  const events = []
+  for (let index = 0; index < 2; index += 1) {
+    const at = base + index * 1000
+    events.push(
+      envelope("session.execution.started", { sessionID: equalSession }, at),
+      envelope("session.text.delta", { sessionID: equalSession, assistantMessageID: `msg_eq${index}`, delta: "x" }, at + 100),
+      envelope("session.step.ended", { sessionID: equalSession, assistantMessageID: `msg_eq${index}`, tokens: { output: 10 } }, at + 200),
+      envelope("session.execution.succeeded", { sessionID: equalSession }, at + 300),
+    )
+  }
+  const { storage, cleanup } = await run(events)
+  const record = await waitForRecord(storage, (item) => item.sessionTotals?.turns === 2)
+  check("two responses with the same rate are both kept", (record.sessionTotals?.recentRates ?? []).length === 2, JSON.stringify(record.sessionTotals?.recentRates))
+  cleanup()
+}
+
+// The app's own bundles live under assets/, a directory. A shallow fingerprint
+// walk skipped it and noticed an app update only by the asar's total size, so a
+// rebuild that changed a bundle without changing that size went unnoticed.
+{
+  const { inspect } = await import("../readout.mjs")
+  const home = mkdtempSync(join(tmpdir(), "vitals-fp-"))
+  const bundle = join(home, "App", "resources", "app.asar")
+  mkdirSync(join(home, "App", "resources"), { recursive: true })
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  const writeBundle = (asset) => {
+    const page = Buffer.from('<!doctype html><script type="module" src="./assets/main-a.js"></script>')
+    const files = { out: { files: { renderer: { files: {
+      "index.html": { size: page.length, offset: "0" },
+      assets: { files: { "main-a.js": { size: Buffer.byteLength(asset), offset: String(page.length) } } },
+    } } } } }
+    const json = Buffer.from(JSON.stringify({ files }), "utf8")
+    const padding = (4 - (json.length % 4)) % 4
+    const header = Buffer.alloc(16)
+    header.writeUInt32LE(4, 0)
+    header.writeUInt32LE(8 + json.length + padding, 4)
+    header.writeUInt32LE(json.length + padding, 8)
+    header.writeUInt32LE(json.length, 12)
+    writeFileSync(bundle, Buffer.concat([header, json, Buffer.alloc(padding), page, Buffer.from(asset)]))
+  }
+  process.env.OPENCODE_DESKTOP_APP = bundle
+  writeBundle("AAAAA")
+  const before = inspect()
+  // Same length, different bytes: only the bundle's content changed, so the
+  // asar's size does not move.
+  writeBundle("BBBBB")
+  const after = inspect()
+  check("a change inside assets changes the fingerprint", before.ok && after.ok && before.fingerprint !== after.fingerprint, JSON.stringify([before.fingerprint, after.fingerprint]))
+  writeBundle("BBBBB")
+  check("and the same bytes give the same fingerprint", inspect().fingerprint === after.fingerprint)
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
+  rmSync(home, { recursive: true, force: true })
+}
+
+// The storage lock is fail-open, and a holder that died without releasing is not
+// waited for. This is the "zombie holder in the singleton lock" the page has
+// claimed to cover since the window was removed.
+{
+  const { withStorageLock, STATUS_DIR } = vitalsInternals
+  mkdirSync(STATUS_DIR, { recursive: true })
+  const lockPath = join(STATUS_DIR, "storage.lock")
+  writeFileSync(lockPath, JSON.stringify({ pid: 999999 }))
+  const longAgo = new Date(Date.now() - 60_000)
+  utimesSync(lockPath, longAgo, longAgo)
+  let ran = false
+  await withStorageLock(async () => { ran = true })
+  check("a stale lock holder does not block a measurement", ran === true)
+  check("and the stale lock is removed", !existsSync(lockPath))
+}
+
+// A machine can have both config files, and the plugin registered in one of them
+// is registered wherever it is.
+{
+  const { isRegistered } = await import("../install.mjs")
+  const home = mkdtempSync(join(tmpdir(), "vitals-bothcfg-"))
+  const config = join(home, "opencode")
+  mkdirSync(config, { recursive: true })
+  writeFileSync(join(config, "opencode.json"), '{"plugins": ["someone-else"]}')
+  writeFileSync(join(config, "opencode.jsonc"), '{\n  // ours\n  "plugins": ["opencode-vitals"],\n}')
+  const found = isRegistered({ name: "opencode-vitals", env: { XDG_CONFIG_HOME: home }, home })
+  check("a plugin registered only in opencode.jsonc is found", found.registered === true && found.file === "opencode.jsonc", JSON.stringify(found))
+  rmSync(home, { recursive: true, force: true })
+}
+
+// A host without HOME must not crash the module on import: the readout's own
+// guards are best-effort, and they never run if the import itself throws.
+{
+  const savedHome = process.env.HOME
+  const savedData = process.env.XDG_DATA_HOME
+  const savedDir = process.env.OPENCODE_VITALS_DIR
+  delete process.env.HOME
+  delete process.env.XDG_DATA_HOME
+  delete process.env.OPENCODE_VITALS_DIR
+  let imported = true
+  try {
+    await import(`../readout.mjs?nohome=${Date.now()}`)
+  } catch {
+    imported = false
+  }
+  check("a machine with no HOME imports the readout module", imported === true)
+  if (savedHome === undefined) delete process.env.HOME
+  else process.env.HOME = savedHome
+  if (savedData === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = savedData
+  if (savedDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = savedDir
+}
+
+// The install command's own edges: a flag with no value is an error, and status
+// does not create the directory it is reporting on.
+{
+  const cli = new URL("../install.mjs", import.meta.url).pathname
+  const missing = spawnSync(process.execPath, [cli, "--dir"], { encoding: "utf8" })
+  check("--dir with no path is an error, not a silent default", missing.status === 1 && /--dir needs a path/.test(missing.stderr ?? ""), JSON.stringify({ status: missing.status, stderr: (missing.stderr ?? "").slice(0, 80) }))
+  const root = mkdtempSync(join(tmpdir(), "vitals-status-nomkdir-"))
+  const plugins = join(root, "plugins")
+  spawnSync(process.execPath, [cli, "status", "--dir", plugins], { encoding: "utf8", env: { ...process.env, XDG_CONFIG_HOME: join(root, "config") } })
+  check("status does not create the plugin directory", !existsSync(plugins), JSON.stringify(existsSync(root) ? readdirSync(root) : []))
+  rmSync(root, { recursive: true, force: true })
+}
+
+// The selftest distinguishes "found" from "could not read", so a failure is not
+// printed under the success label.
+{
+  const cli = new URL("../selftest.mjs", import.meta.url).pathname
+  const root = mkdtempSync(join(tmpdir(), "vitals-selftest-"))
+  const fakeApp = join(root, "App", "resources", "app.asar")
+  mkdirSync(join(root, "App", "resources"), { recursive: true })
+  writeFileSync(fakeApp, "not an asar at all")
+  const output = spawnSync(process.execPath, [cli], { encoding: "utf8", env: { ...process.env, OPENCODE_DESKTOP_APP: fakeApp } })
+  check("selftest says when the renderer could not be read", /renderer could not be read/.test(output.stdout ?? ""), JSON.stringify((output.stdout ?? "").slice(0, 200)))
+  rmSync(root, { recursive: true, force: true })
+}
+
+// The check count printed in the page is a claim like any other, so it is
+// checked. It counts this check too, which is why the expected value is one more
+// than the results so far.
+{
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8")
+  const documented = Number(readme.match(/npm test\s*#\s*(\d+) checks/)?.[1])
+  check("the README's check count matches the suite", documented === results.length + 1, `${documented} vs ${results.length + 1}`)
 }
 
 for (const result of results) {

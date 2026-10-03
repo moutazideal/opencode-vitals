@@ -155,11 +155,15 @@ const paint = (payload) => {
   if (payload?.sessionID) root?.setAttribute("title", `OpenCode Vitals — ${payload.sessionID}`)
 }
 
-// One report so a silent blank row is diagnosable from the server log.
-let reported = false
+// One report so a silent blank row is diagnosable from the server log. It is
+// sent when the state changes and not on every poll: a missing composer reports
+// once, and its recovery reports once, where the old latch reported the failure
+// every second for as long as it lasted.
+let lastReported = null
 const report = (placed, detail) => {
-  if (reported && placed) return
-  reported = true
+  const state = placed ? "placed" : "missing"
+  if (state === lastReported) return
+  lastReported = state
   const query = new URLSearchParams({ placed: String(placed), detail: String(detail).slice(0, 300) })
   fetch(`/__vitals-status?${query}`).catch(() => {})
 }
@@ -170,8 +174,11 @@ const tick = async () => {
   try {
     // Fetch first and place second. Tying the two together meant a composer that
     // was not on screen also silenced the data, which left nothing to diagnose.
+    // A server that accepts the connection and never answers must not stall the
+    // readout forever: without a deadline the poll hangs, `misses` never grows,
+    // and a dead row can never be withdrawn. A timeout is a failed poll.
     const query = sessionID ? `?session=${encodeURIComponent(sessionID)}` : ""
-    const response = await fetch(`/vitals${query}`, { cache: "no-store" })
+    const response = await fetch(`/vitals${query}`, { cache: "no-store", signal: AbortSignal.timeout(2500) })
     if (response.ok) payload = await response.json()
   } catch {
     // The server going away must not take the editor with it.

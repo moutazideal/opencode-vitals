@@ -31,9 +31,13 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const READOUT_SCRIPT = join(HERE, "renderer", "vitals.js")
 const MARKER = ".vitals-sync.json"
 
-const WORK_DIR = process.env.OPENCODE_VITALS_DIR ?? join(process.env.XDG_DATA_HOME ?? join(process.env.HOME, ".local", "share"), "opencode-vitals")
+// `?? ""` on HOME for the same reason update.mjs has it: a host that does not
+// set it must not turn a missing variable into a TypeError while this module is
+// still being imported, before any of the readout's best-effort guards can run.
+const DATA_HOME = process.env.XDG_DATA_HOME ?? join(process.env.HOME ?? "", ".local", "share")
+const WORK_DIR = process.env.OPENCODE_VITALS_DIR ?? join(DATA_HOME, "opencode-vitals")
 const RENDERER_DIR = join(WORK_DIR, "renderer")
-const DESKTOP_DIR = join(process.env.XDG_DATA_HOME ?? join(process.env.HOME, ".local", "share"), "applications")
+const DESKTOP_DIR = join(DATA_HOME, "applications")
 const PORT = Number(process.env.OPENCODE_VITALS_PORT ?? 8971)
 
 // The app's own renderer entry point, and the tag that pulls our script in. The
@@ -127,15 +131,27 @@ function openAsar(path) {
 
 // -- syncing the renderer ----------------------------------------------------
 
-// A fingerprint of the app's own renderer, so a copy is refreshed when OpenCode
-// updates and left alone when it does not. Without this the readout would keep
-// serving last week's UI, which is how a patch quietly becomes a lie.
+// Every file under out/renderer, at every depth, because the app's own bundles
+// live one level down in assets/. A shallow walk skipped the directories and
+// left only the asar's total size to notice an app update by — so a rebuild that
+// changed a bundle without changing that size went unnoticed and the readout
+// kept serving last week's UI. The name is hashed with the content, so a rename
+// is a change too.
 function fingerprint(asar) {
   const hash = createHash("sha256")
-  for (const name of asar.list(["out", "renderer"]).sort()) {
-    const entry = asar.read(["out", "renderer", name])
-    if (entry) hash.update(name).update(entry)
+  const walk = (parts) => {
+    for (const name of asar.list(parts).sort()) {
+      const child = [...parts, name]
+      if (asar.isDir(child)) {
+        hash.update(`${name}/\n`)
+        walk(child)
+        continue
+      }
+      const entry = asar.read(child)
+      if (entry) hash.update(name).update(entry)
+    }
   }
+  walk(["out", "renderer"])
   hash.update(String(statSync(asar.path ?? "").size))
   return hash.digest("hex").slice(0, 32)
 }
@@ -469,7 +485,7 @@ export function removeDesktopEntry({ dir } = {}) {
 export function removeReadout({ workDir, desktopDir } = {}) {
   const target = workDir ?? WORK_DIR
   const entry = removeDesktopEntry({ dir: desktopDir })
-  const renderer = { ok: true, path: RENDERER_DIR }
+  const renderer = { ok: true, path: target }
   try {
     // The whole work directory, not just the renderer inside it: leaving an
     // empty shell behind means "uninstalled" still has a directory named after
@@ -482,6 +498,22 @@ export function removeReadout({ workDir, desktopDir } = {}) {
 }
 
 // -- the server --------------------------------------------------------------
+
+// A file that was there when it was stat'd and gone by the time it is opened is
+// a read stream that emits an error. Left unhandled that is an uncaught
+// exception in the plugin host — the one thing this readout is not allowed to
+// cause. The answer is the same as a miss: a plain 503 before the headers, the
+// connection closed after them, never a crash.
+export function serveAsset(response, path) {
+  const stream = createReadStream(path)
+  stream.on("error", () => {
+    if (response.headersSent) response.destroy()
+    else response.writeHead(503, { "Content-Type": "text/plain" }).end("asset unavailable")
+  })
+  // A client that goes away must not leave the file being read to the end.
+  response.on("close", () => stream.destroy())
+  stream.pipe(response)
+}
 
 // Serves the copied renderer and the numbers. It runs inside the plugin host, so
 // there is no second process to start, stop, supervise or leave behind.
@@ -548,7 +580,7 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
     if (!found) found = ensureCopy() ? find() : null
     if (found) {
       response.writeHead(200, { "Content-Type": TYPES[found.slice(found.lastIndexOf("."))] ?? "application/octet-stream", "Cache-Control": "no-store" })
-      createReadStream(found).pipe(response)
+      serveAsset(response, found)
       return
     }
     if (pathname.includes(".", pathname.lastIndexOf("/") + 1)) {

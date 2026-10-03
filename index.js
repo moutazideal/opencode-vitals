@@ -758,13 +758,13 @@ function createState(rawOptions, context = {}) {
   }
 
   function pushRecentRate(totals, rate) {
+    // Every finished response contributes its rate. A replayed response never
+    // reaches here — the response marker and the completed-turn set refuse it
+    // first — so a value that merely equals its neighbour's is a real response
+    // that happened to run at the same speed, and skipping it made the last-ten
+    // mean a mean of nine.
     if (!Number.isFinite(rate) || rate <= 0) return
-    const rounded = Math.round(rate * 10) / 10
-    if (totals.recentRates[totals.recentRates.length - 1] === rounded) {
-      // The same response counted twice (a replayed event) is not a new turn.
-      return
-    }
-    totals.recentRates.push(rounded)
+    totals.recentRates.push(Math.round(rate * 10) / 10)
     while (totals.recentRates.length > RECENT_RATE_COUNT) totals.recentRates.shift()
   }
 
@@ -868,6 +868,10 @@ function createState(rawOptions, context = {}) {
         completedResponseKeys.delete(completedResponseKeys.values().next().value)
       }
     }
+    // Refresh insertion order on every close, so eviction drops the session that
+    // closed longest ago rather than the one that happened to close first: a
+    // `Map.set` on an existing key keeps its original position.
+    closedTurns.delete(turn.sessionID)
     closedTurns.set(turn.sessionID, uniqueKeys)
     while (closedTurns.size > MAX_CLOSED_TURNS) closedTurns.delete(closedTurns.keys().next().value)
     return true
@@ -921,7 +925,6 @@ function createState(rawOptions, context = {}) {
       agent: null,
       compaction: false,
       ignored: false,
-      failed: false,
     }
   }
 
@@ -1252,25 +1255,31 @@ function createState(rawOptions, context = {}) {
   // on-disk sessions are merged in first and the newest snapshot per session
   // wins whole.
   async function publishSessionTotals() {
-    const sessions = {}
-    for (const [sessionID, totals] of sessionTotals) sessions[sessionID] = totals
-    let existing = null
-    try {
-      const record = JSON.parse(await readFile(SESSION_TOTALS_FILE, "utf8"))
-      if (isRecord(record?.sessions)) existing = record.sessions
-    } catch {
-      existing = null
-    }
-    if (existing) {
-      for (const [sessionID, snapshot] of Object.entries(existing)) {
-        if (!Object.hasOwn(sessions, sessionID)) sessions[sessionID] = snapshot
-        else sessions[sessionID] = newerSnapshot(sessions[sessionID], snapshot)
+    // The read-merge-write is a lost-update race without the lock: every project
+    // instance shares this one file and writes only the sessions it knows, so
+    // two of them finishing a turn at once could each write over the other. The
+    // same lock `persist` takes is taken here for the same reason.
+    await withStorageLock(async () => {
+      const sessions = {}
+      for (const [sessionID, totals] of sessionTotals) sessions[sessionID] = totals
+      let existing = null
+      try {
+        const record = JSON.parse(await readFile(SESSION_TOTALS_FILE, "utf8"))
+        if (isRecord(record?.sessions)) existing = record.sessions
+      } catch {
+        existing = null
       }
-    }
-    await writeJsonAtomic(SESSION_TOTALS_FILE, {
-      version: 1,
-      sessions,
-      updatedAt: new Date().toISOString(),
+      if (existing) {
+        for (const [sessionID, snapshot] of Object.entries(existing)) {
+          if (!Object.hasOwn(sessions, sessionID)) sessions[sessionID] = snapshot
+          else sessions[sessionID] = newerSnapshot(sessions[sessionID], snapshot)
+        }
+      }
+      await writeJsonAtomic(SESSION_TOTALS_FILE, {
+        version: 1,
+        sessions,
+        updatedAt: new Date().toISOString(),
+      })
     })
   }
 
@@ -1425,9 +1434,6 @@ function createState(rawOptions, context = {}) {
       creditParentWithSubagent(parentID, record)
     }
     await persist(record)
-    // Written after the credit above, so the parent this record delegated to is
-    // in the file the readout reads and not only in memory until the next turn.
-    if (options.popup) void publishSessionTotals().catch(() => {})
     log(
       ctx,
       `session=${record.sessionID} start=${record.startSource} first_token=${formatMs(record.firstTokenMs)} ` +
@@ -1438,9 +1444,11 @@ function createState(rawOptions, context = {}) {
         (unknownEventTotal > 0 ? ` unknown_events=${unknownEventTotal} [${record.unknownEventTypes}]` : ""),
     )
     if (options.popup) {
-      // The readout reads the totals from memory, so this file is now only for
-      // the author's own post-mortem and for anything a future reader wants to
-      // inspect. It is written once per finished turn, not per event.
+      // Written after the credit above, so the parent this record delegated to is
+      // in the file the readout reads and not only in memory until the next turn.
+      // The readout reads the totals from memory, so this file is mostly for the
+      // author's own post-mortem — and it is written once per finished turn, not
+      // once per event.
       void publishSessionTotals().catch((error) => {
         warn(ctx, `could not publish session totals: ${String(error)}`)
       })
@@ -1568,7 +1576,6 @@ function createState(rawOptions, context = {}) {
       noteAssistantMessage(turn, value.assistantMessageID)
       setMetadata(turn, { model: value.model, agent: value.agent })
       addStepTokens(turn, value.tokens)
-      if (type === "session.step.failed") turn.failed = true
       return
     }
     if (type === "session.text.started") {
@@ -1659,6 +1666,8 @@ export const vitalsInternals = {
   RESPONSE_MARKER_TTL_MS,
   HANDLED_TYPES,
   SESSION_TOTALS_FILE,
+  STATUS_DIR,
+  withStorageLock,
   readOwnVersion,
   notePluginVersion,
   claimResponse,
@@ -1703,22 +1712,25 @@ export default {
       if (markerTimer) clearInterval(markerTimer)
       if (runtime.markerTimer === markerTimer) runtime.markerTimer = null
       if (updateTimer) clearTimeout(updateTimer)
-      // The listening socket, closed with the plugin that opened it. unref()
-      // stops it holding the event loop open, which is a different thing: the
-      // socket still held the port, so a reloaded plugin found 8971 taken by the
-      // instance that was unloading, was refused the bind, and left with no
-      // server at all — a readout that silently stops, on every reload, forever.
-      // close() releases the port at once; the second call drops the keep-alive
-      // connections the readout's own polling holds open.
-      if (readoutServer) {
+      // A reloaded instance must not keep answering for a session it no longer
+      // measures, so it leaves the pool first — and the shared server is closed
+      // only when it was the last instance still using it. Closing it for every
+      // cleanup took the readout away from every other open project, and nothing
+      // started it again until that project reloaded.
+      readoutStates.delete(state)
+      if (readoutServer && readoutStates.size === 0) {
+        // The listening socket, closed with the plugin that opened it. unref()
+        // stops it holding the event loop open, which is a different thing: the
+        // socket still held the port, so a reloaded plugin found 8971 taken by the
+        // instance that was unloading, was refused the bind, and left with no
+        // server at all — a readout that silently stops, on every reload, forever.
+        // close() releases the port at once; the second call drops the keep-alive
+        // connections the readout's own polling holds open.
         readoutServer.close(() => {})
         readoutServer.closeAllConnections?.()
         readoutServer = null
       }
       if (runtime.controller === controller) runtime.controller = null
-      // A reloaded instance must not keep answering for a session it no longer
-      // measures: the state leaves the pool with its cleanup.
-      readoutStates.delete(state)
     }
     // With the readout on, this process serves the numbers the app's own window
     // asks for, and keeps the copy of the app's renderer in step with the app.

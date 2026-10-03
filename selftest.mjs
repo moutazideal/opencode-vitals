@@ -58,7 +58,7 @@ say(Boolean(binary && existsSync(binary)), "the launcher binary is where the ent
 // to find out would leave forty-odd megabytes behind on a machine that was only
 // being asked a question.
 const report = readoutInternals.inspect()
-say(report.ok, report.ok ? "the app's renderer can be found" : "the app's renderer can be found", report.ok ? report.fingerprint : report.reason)
+say(report.ok, report.ok ? "the app's renderer can be found" : "the app's renderer could not be read", report.ok ? report.fingerprint : report.reason)
 if (report.ok) {
   say(report.injectable, "the readout can be injected beside the app's bundle", report.injectable ? "the page loads a module bundle" : report.reason)
   // A note, not a check. Whether a copy exists yet is a fact about the install,

@@ -54,7 +54,7 @@ const mean = (rates) => {
 const currentSession = () => {
   try {
     const link = document.querySelector(`${TAB} a[href]`)
-    const match = link?.getAttribute("href")?.match(/\/session\/(ses_[a-zA-Z0-9]+)/)
+    const match = link?.getAttribute("href")?.match(/\/session\/(ses_[a-zA-Z0-9_-]+)/)
     return match ? match[1] : null
   } catch {
     return null

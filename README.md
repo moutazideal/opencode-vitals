@@ -560,7 +560,7 @@ To install a copy of the checkout instead, drop the `--link`. To put it somewher
 ### Development
 
 ```bash
-npm test           # 419 checks
+npm test           # 426 checks
 node selftest.mjs  # can this machine show the readout?
 npm pack           # build the publishable tarball
 npm run prepublishOnly   # what publish runs first

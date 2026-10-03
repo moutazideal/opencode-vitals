@@ -18,6 +18,11 @@ process.env.TMPDIR = SUITE_TMP
 // developer's real one, so every read and write of it is redirected here.
 process.env.XDG_CONFIG_HOME = join(SUITE_TMP, "config")
 mkdirSync(join(SUITE_TMP, "config", "opencode"), { recursive: true })
+// The data root too: the launcher entry is now removed by scanning the
+// applications directory, and a suite run must never look at — or delete from —
+// the developer's real one.
+process.env.XDG_DATA_HOME = join(SUITE_TMP, "data")
+mkdirSync(join(SUITE_TMP, "data"), { recursive: true })
 // The readout binds a real socket, so the suite gets its own port rather than
 // fighting the developer's running instance for 8971. And it is pointed at an app
 // that does not exist, so a suite run never copies a 43MB renderer or writes a
@@ -1341,6 +1346,10 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     return injectTag(Buffer.from(once)) === once
   })())
   check("injection: a page with no module bundle is refused, not guessed at", injectTag(Buffer.from("<html></html>")) === null)
+  // The bundle's filename changes between OpenCode builds; the anchor is the
+  // module script itself, so a new name is not a reason the readout cannot load.
+  check("injection: a differently named bundle is still found", injectTag(Buffer.from('<script type="module" src="./assets/index-xyz789.js"></script>')).includes(SCRIPT_TAG))
+  check("injection: an absolute bundle path is still found", injectTag(Buffer.from('<script type="module" src="/assets/chunk-abc.js"></script>')).includes(SCRIPT_TAG))
 
   // -- the launcher entry -----------------------------------------------------
   // Ours is a copy of the system entry with Exec changed, so the packager's icon,
@@ -1362,9 +1371,24 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const missing = syncRenderer({ force: true })
   check("no app is reported, not thrown", missing.ok === false && typeof missing.reason === "string", JSON.stringify(missing))
   check("a missing app installs no launcher", installDesktopEntry().ok === false)
-  check("a missing app removes nothing", removeDesktopEntry().ok === false)
+  const nothingToRemove = removeDesktopEntry()
+  check("a missing app has no entry to remove", nothingToRemove.ok === true && nothingToRemove.removed === 0, JSON.stringify(nothingToRemove))
   if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
   else process.env.OPENCODE_DESKTOP_APP = previousApp
+}
+
+// The launcher entry is found by its own marker, so an OpenCode update that
+// moves or removes the system entry cannot leave ours behind pointing at a
+// server that is gone — the failure that stops OpenCode opening.
+{
+  const { removeDesktopEntry } = await import("../readout.mjs")
+  const dir = mkdtempSync(join(tmpdir(), "vitals-entry-"))
+  writeFileSync(join(dir, "ai.opencode.desktop.desktop"), "[Desktop Entry]\nName=OpenCode\nX-OpenCode-Vitals=readout\n")
+  writeFileSync(join(dir, "someone-else.desktop"), "[Desktop Entry]\nName=Other\n")
+  const report = removeDesktopEntry({ dir })
+  check("our entry is removed without needing the system entry", report.ok === true && report.removed === 1 && !existsSync(join(dir, "ai.opencode.desktop.desktop")), JSON.stringify(report))
+  check("an entry that is not ours is left alone", existsSync(join(dir, "someone-else.desktop")))
+  rmSync(dir, { recursive: true, force: true })
 }
 
 // The readout answers for the session it is asked about and no other. Several
@@ -1601,7 +1625,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // An entry we did not write is left alone: the user may have edited it.
   writeFileSync(join(apps, "ai.opencode.desktop.desktop"), "[Desktop Entry]\nName=OpenCode\n")
   const kept = removeReadout()
-  check("a launcher entry we did not write is left alone", kept.entry.ok === false && existsSync(join(apps, "ai.opencode.desktop.desktop")), JSON.stringify(kept.entry))
+  check("a launcher entry we did not write is left alone", kept.entry.removed === 0 && existsSync(join(apps, "ai.opencode.desktop.desktop")), JSON.stringify(kept.entry))
 
   if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
   else process.env.OPENCODE_VITALS_DIR = previousDir
@@ -1777,6 +1801,16 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
     check("it asks for the newly opened session", win.asked.at(-1).includes("session=ses_second"), JSON.stringify(win.asked.at(-1)))
     check("and paints that session's numbers", readout(win).text.includes("4"), readout(win).text)
   }
+
+  // A session id may contain a dash or an underscore, so the readout has to take
+  // the whole id rather than stopping at the first one — a truncated id asks for
+  // a session that does not exist and the row shows dashes.
+  {
+    const win = mount({ href: "/session/ses_abc-123_xyz" })
+    win.server.payload = measured
+    await win.poll()
+    check("a session id with a dash and an underscore is read whole", win.asked.some((url) => url.includes("session=ses_abc-123_xyz")), JSON.stringify(win.asked))
+  }
   // The app re-renders its composer and takes the node with it. Nothing is
   // polled between the re-render and the check, so what puts the row back is the
   // mutation observer rather than the next tick — which is the difference between
@@ -1929,10 +1963,21 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("the new page carries the readout too", /build" content="2"/.test(copied() ?? "") && /vitals\.js/.test(copied() ?? ""), JSON.stringify(copied()))
   check("and it is injected once, not twice", (copied()?.match(/vitals\.js/g) ?? []).length === 1, JSON.stringify(copied()))
 
-  // A new version of *this* plugin changes nothing about the app, so it must not
-  // churn the copy either.
+  // An app that has not changed must not be copied again.
   const stable = syncRenderer()
   check("and then it settles again", stable.changed === false, JSON.stringify(stable))
+
+  // A new version of *this* plugin changes the readout script while the app stays
+  // put, so the script is copied into the existing copy without rebuilding the
+  // whole interface. Before this, renderer fixes never reached an installed copy
+  // until OpenCode itself updated.
+  const markerPath = join(work, "renderer", ".vitals-sync.json")
+  const marker = JSON.parse(readFileSync(markerPath, "utf8"))
+  marker.script = "an-older-readout"
+  writeFileSync(markerPath, JSON.stringify(marker))
+  const refreshed = syncRenderer()
+  check("a changed readout script is copied in without an app update", refreshed.ok === true && refreshed.changed === true, JSON.stringify(refreshed))
+  check("and the marker records the new script", JSON.parse(readFileSync(markerPath, "utf8")).script !== "an-older-readout", JSON.stringify(JSON.parse(readFileSync(markerPath, "utf8")).script))
 
   if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
   else process.env.OPENCODE_VITALS_DIR = previousDir

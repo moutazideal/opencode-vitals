@@ -164,12 +164,26 @@ function readMarker() {
   }
 }
 
+// The readout's own script is not the app's. A plugin update changes it while
+// the app stays put, so it is part of the copy's stamp: without it a new readout
+// never reached a copy whose app had not moved, and renderer fixes sat unused
+// until OpenCode itself updated.
+function readoutScriptHash() {
+  try {
+    return createHash("sha256").update(readFileSync(READOUT_SCRIPT)).digest("hex").slice(0, 16)
+  } catch {
+    return null
+  }
+}
+
 function injectTag(html) {
   const source = html.toString("utf8")
   if (source.includes("vitals.js")) return source
-  // Beside the app's bundle. If the app ever stops shipping that exact line, say
-  // so rather than injecting a tag nothing would load.
-  const anchor = /<script[^>]*src="\.\/assets\/main-[^"]+\.js"[^>]*><\/script>/
+  // Beside the app's own module bundle. The build's filename changes between
+  // releases, so the anchor is the module script itself rather than one build's
+  // name. A page with no module script at all cannot be extended, and null says
+  // so rather than injecting a tag that would never load.
+  const anchor = /<script[^>]*type="module"[^>]*src="[^"]+"[^>]*><\/script>/
   if (!anchor.test(source)) return null
   return source.replace(anchor, (match) => `${match}\n    ${SCRIPT_TAG}`)
 }
@@ -260,9 +274,21 @@ export function syncRenderer({ force = false } = {}) {
   }
 
   const app = createHash("sha256").update(path).digest("hex").slice(0, 8)
-  const stamp = { app, fingerprint: fingerprint({ ...asar, path }) }
+  const stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
   const previous = readMarker()
   if (!force && previous && previous.app === stamp.app && previous.fingerprint === stamp.fingerprint) {
+    // The app is unchanged, but the readout script may not be: a plugin update
+    // changes it while the app stays put, so it is copied in on its own rather
+    // than rebuilding the whole interface for it.
+    if (previous.script !== stamp.script && rendererReady()) {
+      try {
+        copyFileSync(READOUT_SCRIPT, join(RENDERER_DIR, "vitals.js"))
+        writeFileSync(join(RENDERER_DIR, MARKER), JSON.stringify(stamp))
+        return { ok: true, changed: true, ...stamp }
+      } catch (error) {
+        return { ok: false, reason: `could not update ${join(RENDERER_DIR, "vitals.js")}: ${String(error)}` }
+      }
+    }
     return { ok: true, changed: false, ...stamp }
   }
 
@@ -332,7 +358,7 @@ export function inspect() {
     return { ok: false, reason: `${path} has no out/renderer/index.html` }
   }
   const app = createHash("sha256").update(path).digest("hex").slice(0, 8)
-  const stamp = { app, fingerprint: fingerprint({ ...asar, path }) }
+  const stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
   // The one question a copy cannot answer without being made: is there a module
   // bundle for the readout to sit beside? Injecting into a buffer proves it and
   // costs nothing.
@@ -346,8 +372,8 @@ export function inspect() {
     copy: {
       present: rendererReady(),
       // "current" is a claim about the copy on disk, so it is only true when the
-      // copy was made from this exact bundle.
-      current: Boolean(installed && installed.app === stamp.app && installed.fingerprint === stamp.fingerprint),
+      // copy was made from this exact bundle and carries this exact readout.
+      current: Boolean(installed && installed.app === stamp.app && installed.fingerprint === stamp.fingerprint && installed.script === stamp.script),
     },
   }
 }
@@ -458,22 +484,42 @@ export function installDesktopEntry() {
 }
 
 export function removeDesktopEntry({ dir } = {}) {
-  const app = findApp()
-  if (!app) return { ok: false, reason: "no app" }
-  const systemEntry = readSystemEntry(app)
-  if (!systemEntry) return { ok: false, reason: "no system launcher to mirror" }
-  const path = join(dir ?? DESKTOP_DIR, systemEntry.name)
+  const target = dir ?? DESKTOP_DIR
+  // Found by what it says about itself, not by mirroring the system entry's
+  // name. After an OpenCode update the system entry can move or disappear, and
+  // the entry this plugin wrote is exactly the file that must not be left
+  // pointing at a server that cannot serve — so it is located by its own marker
+  // and removed whether or not the system entry can still be found.
+  let names
   try {
+    names = readdirSync(target)
+  } catch (error) {
+    if (error?.code === "ENOENT") return { ok: true, path: null, removed: 0 }
+    return { ok: false, reason: String(error), removed: 0 }
+  }
+  let removed = 0
+  let first = null
+  for (const name of names) {
+    if (!name.endsWith(".desktop")) continue
+    const path = join(target, name)
+    let body
+    try {
+      body = readFileSync(path, "utf8")
+    } catch {
+      continue
+    }
     // Only ever removes the entry we wrote, and only while it still carries our
     // marker: a file the user has since edited is theirs, not ours to delete.
-    const body = readFileSync(path, "utf8")
-    if (!body.includes("X-OpenCode-Vitals")) return { ok: false, reason: "left alone: not our entry" }
-    rmSync(path, { force: true })
-    return { ok: true, path }
-  } catch (error) {
-    if (error?.code === "ENOENT") return { ok: true, path }
-    return { ok: false, reason: String(error) }
+    if (!body.includes("X-OpenCode-Vitals")) continue
+    try {
+      rmSync(path, { force: true })
+      removed += 1
+      if (first === null) first = path
+    } catch {
+      // A file that cannot be removed is reported by the count not moving.
+    }
   }
+  return { ok: true, path: first, removed }
 }
 
 // Uninstall has to take both halves with it. Leaving either behind means a

@@ -207,7 +207,7 @@ already looks after. What replaced the concern is the copy, and that is §7.
 Run with `npm test`. These do not replace the sheet above; they cover the
 arithmetic and the guards, not how the app behaves.
 
-- 419 checks in one suite: event accounting, totals, snapshot ranking, storage
+- 426 checks in one suite: event accounting, totals, snapshot ranking, storage
   locking, subagent credit, the asar reader, the injection, the launcher entry,
   one server shared by many instances, the numbers the readout is actually
   served, and the README's own commands.

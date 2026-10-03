@@ -158,34 +158,46 @@ function syncReadout() {
 }
 
 // One decision, made wherever the plugin finds out something changed: the entry
-// exists exactly while there is a copy to serve. Kept in one place because the
-// two mistakes it prevents are the same mistake, and because a second copy of
+// exists exactly while the app can actually be served. Kept in one place because
+// the two mistakes it prevents are the same mistake, and because a second copy of
 // this rule is a second thing to get wrong.
-async function ensureReadoutEntry(state, ctx) {
-  // A copy that is already there is a copy that can be served; one that is not
-  // is rebuilt, because not rebuilding is the state this function exists to
-  // prevent.
-  const serving = rendererReady() || syncReadout().ok
+//
+// "Serving" is not "a copy exists". After an OpenCode update the copy on disk is
+// the previous version's interface, and the launcher entry hands the whole
+// application to it — so a stale copy is not a missing readout, it is an
+// application that will not open. The copy has to be current for the installed
+// app (`syncRenderer` says so by succeeding) and the server has to be listening.
+// When either half is missing the entry comes out, and OpenCode starts with its
+// own UI: the readout degrades to nothing, never to a broken editor.
+async function ensureReadoutEntry(state, ctx, synced) {
+  const result = synced ?? syncReadout()
+  const serving = result.ok && Boolean(readoutServer)
   if (serving) {
     const entry = installDesktopEntry()
     if (entry.ok) {
       readoutEntryWarned = false
-    } else if (entry.reason !== "no app" && !readoutEntryWarned) {
+      return { serving: true, entry }
+    }
+    if (entry.reason !== "no app" && !readoutEntryWarned) {
       // "no app" is not a fault: a headless or TUI-only machine measures the same
       // numbers and simply has no window to draw them in. Warning about it on
       // every launch would teach people to ignore this plugin's warnings.
       readoutEntryWarned = true
       state.warn(null, `readout launcher entry not installed: ${entry.reason}`)
     }
-    return { serving: true, entry }
+    // A copy is current and the server is up, but the entry that starts the app
+    // pointed at them could not be written. Ours is removed rather than left
+    // half-right: the app has to be able to start.
+    const removed = removeDesktopEntry()
+    return { serving: false, entry, removed }
   }
   // Not serving, so nothing may point at us. An entry left behind here is the
   // one state in which the application cannot start, and leaving it behind is
-  // what a `rm -rf` of the data directory used to do.
+  // what an app update or a `rm -rf` of the data directory used to do.
   const removed = removeDesktopEntry()
-  if (removed.ok && !readoutEntryWarned) {
+  if (removed.removed > 0 && !readoutEntryWarned) {
     readoutEntryWarned = true
-    state.warn(ctx, "readout removed its launcher entry: the app's interface copy could not be built, so OpenCode was left to start itself")
+    state.warn(ctx, "readout removed its launcher entry: it could not serve, so OpenCode was left to start itself")
   }
   return { serving: false, entry: removed }
 }
@@ -212,11 +224,12 @@ function startReadout(state) {
       onError: (error) => {
         readoutServer = null
         state.warn(null, `readout server stopped: ${String(error)}`)
+        // Nothing may point at a server that is not listening.
+        try { removeDesktopEntry() } catch {}
       },
     })
   }
-  const synced = syncReadout()
-  return synced.ok ? { ok: true, ...synced } : { ok: false, served: true, reason: synced.reason }
+  return syncReadout()
 }
 
 // -- a reply in flight --------------------------------------------------------
@@ -1736,10 +1749,11 @@ export default {
     // asks for, and keeps the copy of the app's renderer in step with the app.
     // Both are best-effort: if either fails the measurement is unaffected, so a
     // failure is reported once and then left alone.
+    let initialSync = null
     if (state.options.popup) {
       try {
         readoutStates.add(state)
-        startReadout(state)
+        initialSync = startReadout(state)
         companionTimer = setInterval(() => {
           const synced = syncReadout()
           if (!synced.ok) {
@@ -1751,7 +1765,7 @@ export default {
           // nothing to serve, and the next tick is the next chance to notice.
           void (async () => {
             try {
-              await ensureReadoutEntry(state, ctx)
+              await ensureReadoutEntry(state, ctx, synced)
             } catch (error) {
               state.warn(ctx, `readout launcher entry: ${String(error)}`)
             }
@@ -1802,13 +1816,20 @@ export default {
     // only if serving, and the failure is a stale entry left from a previous
     // good state; remove only if not serving, and the failure is that the setup
     // never happened.
-    void (async () => {
-      try {
-        await ensureReadoutEntry(state, ctx)
-      } catch (error) {
-        state.warn(null, `readout launcher entry: ${String(error)}`)
-      }
-    })()
+    if (state.options.popup) {
+      void (async () => {
+        try {
+          await ensureReadoutEntry(state, ctx, initialSync)
+        } catch (error) {
+          state.warn(null, `readout launcher entry: ${String(error)}`)
+        }
+      })()
+    } else {
+      // popup:false means serve nothing to the app, so nothing may point at the
+      // readout either. An entry a previous configuration left behind is removed,
+      // so a disabled readout cannot stop OpenCode from opening.
+      try { removeDesktopEntry() } catch {}
+    }
     void later(() => updateIfNeeded({ onReport: (message) => state.warn(null, message) }))
 
     if (!ctx.event?.subscribe) {

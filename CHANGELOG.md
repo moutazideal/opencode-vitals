@@ -61,6 +61,32 @@ shows are the ones that happened.
   created the plugin directory it was only reporting on. Both are fixed.
 - The selftest printed a renderer it could not read under the label for one it
   found.
+- **After an OpenCode update the readout could stop OpenCode opening.** The
+  launcher entry was kept whenever a copy merely *existed*, so an update that
+  changed the app's bundle left the new app handed the previous version's
+  interface through the entry. Serving now requires the copy to be current for
+  the installed app and the server to be listening; when either half is missing
+  the entry is removed, and OpenCode starts with its own UI. The readout degrades
+  to nothing, never to an editor that will not open.
+- **The launcher entry could not be removed once the system entry moved.** It was
+  located by mirroring the system entry's name, so an app update that changed or
+  removed that entry left ours behind, pointing at a server that could not serve.
+  It is now found by its own marker and removed whether or not the system entry
+  can still be found.
+- **A plugin update never refreshed the readout script.** The copy's stamp
+  carried only the app's fingerprint, so a new `vitals.js` sat unused until
+  OpenCode itself updated — every renderer fix since 0.1.8 waited on somebody
+  else's release. The script's hash is part of the stamp now, and a changed
+  script is copied into the existing copy without rebuilding the interface.
+- **`popup:false` still built the copy and wrote the launcher entry**, pointing
+  the app at a server this instance never started. It now serves nothing and
+  removes any entry a previous configuration left behind.
+- **The injection anchor required one build's bundle name**
+  (`./assets/main-*.js`). A release that renamed its bundle made the copy
+  impossible and, before the entry fix, left the app on the old interface. Any
+  module script with a source is accepted now.
+- **A session id containing a dash or an underscore was truncated** by the
+  readout, so the row showed dashes for a session that had real numbers.
 
 ### Changed
 
@@ -74,7 +100,7 @@ shows are the ones that happened.
 
 ### Measured
 
-- 419 checks, up from 400.
+- 426 checks, up from 400.
 
 ## [0.1.11] - 2026-09-29
 

@@ -37,6 +37,11 @@ const MARKER = ".vitals-sync.json"
 const DATA_HOME = process.env.XDG_DATA_HOME ?? join(process.env.HOME ?? "", ".local", "share")
 const WORK_DIR = process.env.OPENCODE_VITALS_DIR ?? join(DATA_HOME, "opencode-vitals")
 const RENDERER_DIR = join(WORK_DIR, "renderer")
+// The copy this plugin replaces when OpenCode updates. It is kept, not removed,
+// because a window that loaded it before the update is still running and will
+// lazily import its own hashed chunks by name — names that exist only in the
+// copy it loaded.
+const PREVIOUS_RENDERER_DIR = `${RENDERER_DIR}.old`
 const DESKTOP_DIR = join(DATA_HOME, "applications")
 const PORT = Number(process.env.OPENCODE_VITALS_PORT ?? 8971)
 
@@ -328,7 +333,9 @@ export function syncRenderer({ force = false } = {}) {
       if (existsSync(retired) && !existsSync(RENDERER_DIR)) renameSync(retired, RENDERER_DIR)
       throw error
     }
-    rmSync(retired, { recursive: true, force: true })
+    // `retired` is deliberately kept: a window that loaded it before this update
+    // is still running, and the hashed chunks it imports lazily exist only there.
+    // It is replaced on the next update, so exactly one previous copy is kept.
     return { ok: true, changed: true, ...stamp }
   } catch (error) {
     rmSync(staging, { recursive: true, force: true })
@@ -610,7 +617,19 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
     const name = pathname.split("/").pop()
     const find = () => {
       const direct = join(RENDERER_DIR, pathname)
-      return fileExists(direct) ? direct : [join(RENDERER_DIR, name), join(RENDERER_DIR, "assets", name)].find(fileExists)
+      if (fileExists(direct)) return direct
+      // The current copy first, then the one it replaced. A window that loaded
+      // the previous copy is still running and imports its own hashed chunks by
+      // name; those exist only in the previous copy. Without this, an OpenCode
+      // update turns a running window into "Failed to fetch dynamically imported
+      // module". The shell and vitals.js are never taken from here — they are
+      // served from the current copy by the branches below.
+      for (const root of [RENDERER_DIR, PREVIOUS_RENDERER_DIR]) {
+        for (const candidate of [join(root, name), join(root, "assets", name)]) {
+          if (fileExists(candidate)) return candidate
+        }
+      }
+      return undefined
     }
     let found = find()
     // A miss is rebuilt once, here, rather than answered.

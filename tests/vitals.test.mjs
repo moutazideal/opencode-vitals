@@ -2422,7 +2422,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("a fresh build succeeds", first.ok === true && rendererReady(), JSON.stringify(first))
   const rebuilt = syncRenderer({ force: true })
   check("a rebuild replaces the copy", rebuilt.ok === true && rendererReady(), JSON.stringify(rebuilt))
-  check("and leaves no staging or retired directory behind", !existsSync(`${ri.RENDERER_DIR}.new`) && !existsSync(`${ri.RENDERER_DIR}.old`), `${existsSync(`${ri.RENDERER_DIR}.new`)} ${existsSync(`${ri.RENDERER_DIR}.old`)}`)
+  check("and leaves no staging directory behind", !existsSync(`${ri.RENDERER_DIR}.new`), `${existsSync(`${ri.RENDERER_DIR}.new`)}`)
+  check("and keeps the previous copy for a window still running it", existsSync(`${ri.RENDERER_DIR}.old`), `${existsSync(`${ri.RENDERER_DIR}.old`)}`)
 
   await new Promise((resolve) => server.close(resolve))
   if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
@@ -2689,6 +2690,63 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const output = spawnSync(process.execPath, [cli], { encoding: "utf8", env: { ...process.env, OPENCODE_DESKTOP_APP: fakeApp } })
   check("selftest says when the renderer could not be read", /renderer could not be read/.test(output.stdout ?? ""), JSON.stringify((output.stdout ?? "").slice(0, 200)))
   rmSync(root, { recursive: true, force: true })
+}
+
+// After an OpenCode update, a window that loaded the previous copy is still
+// running and lazily imports its own hashed chunks by name. Those names exist
+// only in the copy it loaded, so the server keeps that copy and falls back to
+// it. Without this, the update turns the running window into "Failed to fetch
+// dynamically imported module" — the failure this plugin must not cause.
+{
+  const home = mkdtempSync(join(tmpdir(), "vitals-prev-"))
+  const work = join(home, "work")
+  const previousDir = process.env.OPENCODE_VITALS_DIR
+  const previousApp = process.env.OPENCODE_DESKTOP_APP
+  const previousData = process.env.XDG_DATA_HOME
+  process.env.OPENCODE_VITALS_DIR = work
+  process.env.XDG_DATA_HOME = home
+  process.env.OPENCODE_DESKTOP_APP = join(home, "App", "resources", "app.asar")
+  mkdirSync(join(home, "App", "resources"), { recursive: true })
+
+  const writeBundle = (chunk) => {
+    const page = Buffer.from(`<!doctype html><script type="module" src="./assets/${chunk}"></script>`)
+    const asset = Buffer.from(`// ${chunk}`)
+    const files = { out: { files: { renderer: { files: {
+      "index.html": { size: page.length, offset: "0" },
+      assets: { files: { [chunk]: { size: asset.length, offset: String(page.length) } } },
+    } } } } }
+    const json = Buffer.from(JSON.stringify({ files }), "utf8")
+    const pad = (4 - (json.length % 4)) % 4
+    const header = Buffer.alloc(16)
+    header.writeUInt32LE(4, 0)
+    header.writeUInt32LE(8 + json.length + pad, 4)
+    header.writeUInt32LE(json.length + pad, 8)
+    header.writeUInt32LE(json.length, 12)
+    writeFileSync(process.env.OPENCODE_DESKTOP_APP, Buffer.concat([header, json, Buffer.alloc(pad), page, asset]))
+  }
+
+  writeBundle("old-chunk.js")
+  const { serve, syncRenderer, readoutInternals } = await import(`../readout.mjs?prev=${Date.now()}`)
+  check("the first build makes a copy", syncRenderer().ok === true)
+  writeBundle("new-chunk.js")
+  check("an update rebuilds the copy", syncRenderer().changed === true)
+
+  const port = readoutInternals.PORT + 3
+  const server = serve({ getSession: () => ({ sessionID: null, totals: null }), port })
+  for (let attempt = 0; attempt < 40 && !server.listening; attempt += 1) await wait(25)
+  const status = async (path) => (await fetch(`http://127.0.0.1:${port}${path}`)).status
+  check("the new chunk is served from the current copy", (await status("/assets/new-chunk.js")) === 200)
+  check("the previous chunk is served from the kept copy", (await status("/assets/old-chunk.js")) === 200)
+  check("a chunk in neither copy is still a 404", (await status("/assets/never-existed.js")) === 404)
+  await new Promise((resolve) => server.close(resolve))
+
+  if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = previousDir
+  if (previousApp === undefined) delete process.env.OPENCODE_DESKTOP_APP
+  else process.env.OPENCODE_DESKTOP_APP = previousApp
+  if (previousData === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = previousData
+  rmSync(home, { recursive: true, force: true })
 }
 
 // The check count printed in the page is a claim like any other, so it is

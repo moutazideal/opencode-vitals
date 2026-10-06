@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-10-06
+
+An OpenCode update no longer breaks the window it was loaded into.
+
+### Fixed
+
+- **A window running the previous interface broke when OpenCode updated under
+  it.** The plugin serves a copy of the app's renderer, and on an update it
+  rebuilds that copy from the new app. A window that had loaded the old copy —
+  which is what happens while the app restarts and the rebuild is still copying —
+  then lazily imports its own hashed chunks, and those names exist only in the
+  old copy. The new copy answered 404, and OpenCode showed "Failed to fetch
+  dynamically imported module" instead of the editor. The previous copy is now
+  kept beside the current one and served for any asset the current copy does not
+  have, so a window that is one version behind keeps working until it reloads.
+  It is replaced on the next update, so exactly one previous copy is kept.
+
+### Changed
+
+- The readout's own directory now holds `renderer` and `renderer.old` between
+  updates. Uninstall removes both, as it always removed the whole directory.
+
+### Measured
+
+- 432 checks, up from 426.
+
 ## [0.1.12] - 2026-10-03
 
 The readout stops taking itself away from other projects, and the numbers it

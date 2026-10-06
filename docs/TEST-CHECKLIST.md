@@ -207,7 +207,7 @@ already looks after. What replaced the concern is the copy, and that is §7.
 Run with `npm test`. These do not replace the sheet above; they cover the
 arithmetic and the guards, not how the app behaves.
 
-- 426 checks in one suite: event accounting, totals, snapshot ranking, storage
+- 432 checks in one suite: event accounting, totals, snapshot ranking, storage
   locking, subagent credit, the asar reader, the injection, the launcher entry,
   one server shared by many instances, the numbers the readout is actually
   served, and the README's own commands.
@@ -226,9 +226,11 @@ they are decisions rather than surprises.
    over the whole document, which is O(mutations) on a long session. A 500-message
    session may pay for it. A narrower observer, or hooking the app's own
    re-render, would fix it.
-3. **The copied renderer goes stale.** The in-app readout is a copy of the app's
-   UI. When OpenCode updates, the copy is behind until it is re-synced. The app
-   keeps working; the readout is what is stale.
+3. **The copied renderer is replaced on an app update.** The in-app readout is a
+   copy of the app's UI, rebuilt when OpenCode updates. The previous copy is kept
+   and served for the chunks a window that loaded it still imports, so a window
+   one version behind keeps working until it reloads; a window that skips more
+   than one update without reloading could still miss a chunk.
 4. **Sessions are capped in the totals file.** Beyond the cap, the least recently
    updated session is dropped, so an old tab can show a dash rather than its
    history. Correct, but surprising if you did not expect it.

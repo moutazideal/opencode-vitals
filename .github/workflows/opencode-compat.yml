@@ -1,0 +1,173 @@
+name: OpenCode compatibility
+
+# OpenCode's plugin API moves with the app: a new release can rename or remove
+# an event this plugin matches on, and nothing here would notice until a user's
+# numbers quietly stopped. This asks npm for the current API version, tests the
+# plugin against it, and opens one issue per version with the verdict. A version
+# that is already pinned in package.json is the normal case and says nothing.
+#
+# The pinned dev dependency is the latch and the record: bumping it is the fix,
+# and until it is bumped the open issue keeps the new version visible.
+
+on:
+  schedule:
+    # Once a day, off the hour. A release is not urgent enough to justify more.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Test a specific @opencode/plugin version instead of the latest
+        required: false
+        default: ""
+  push:
+    paths:
+      - package.json
+      - .github/workflows/opencode-compat.yml
+
+permissions:
+  contents: read
+  issues: write
+
+# Two runs must not race for the same issue.
+concurrency:
+  group: opencode-compat
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Read the pinned and published versions
+        id: versions
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          pinned=$(node -p "require('./package.json').devDependencies['@opencode/plugin']")
+          if [ -n "$REQUESTED" ]; then
+            latest="$REQUESTED"
+          else
+            latest=$(npm view @opencode/plugin version)
+          fi
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$pinned" = "$latest" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "@opencode/plugin is pinned at $pinned, which is the latest. Nothing to check."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "package.json pins $pinned; npm publishes $latest."
+          fi
+
+      - name: Install the pinned version
+        if: steps.versions.outputs.changed == 'true'
+        run: npm install
+
+      - name: Test the plugin against the new version
+        if: steps.versions.outputs.changed == 'true'
+        id: verdict
+        env:
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          # The plugin brings its own matching schema; both move in lockstep.
+          npm install --no-save --no-package-lock \
+            "@opencode/plugin@$LATEST" "@opencode/schema@$LATEST"
+          status=compatible
+          # The plugin's own suite first: a regression it can see is the plainest
+          # answer. Then the event contract, which is the check that actually
+          # knows what a new OpenCode did to the names this plugin depends on.
+          npm test > test.log 2>&1 || status=incompatible
+          npm run test:compat > compat-test.log 2>&1 || status=incompatible
+          npm run compat > compat.log 2>&1 || status=incompatible
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "Verdict for $LATEST: $status"
+
+      - name: Write the report
+        if: steps.versions.outputs.changed == 'true'
+        env:
+          PINNED: ${{ steps.versions.outputs.pinned }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+          STATUS: ${{ steps.verdict.outputs.status }}
+        run: |
+          {
+            echo "The scheduled compatibility check tested this plugin against \`@opencode/plugin@$LATEST\`."
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Pinned in \`package.json\` | \`$PINNED\` |"
+            echo "| Published | \`$LATEST\` |"
+            echo "| Verdict | **$STATUS** |"
+            echo
+            if [ "$STATUS" = "compatible" ]; then
+              echo "Every event this plugin handles still exists in the new schema, and the suite passes. To move the pin:"
+              echo
+              echo '```bash'
+              echo "npm install --save-dev @opencode/plugin@$LATEST @opencode/schema@$LATEST"
+              echo '```'
+            else
+              echo "Something this plugin depends on changed. The details are below; the plugin needs an update before this OpenCode release."
+            fi
+            echo
+            echo "<details><summary>Test suite</summary>"
+            echo
+            echo '```'
+            tail -40 test.log 2>/dev/null || echo "(the suite did not run)"
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "<details><summary>Event contract</summary>"
+            echo
+            echo '```'
+            cat compat.log 2>/dev/null || echo "(the contract check did not run)"
+            echo '```'
+            echo
+            echo "</details>"
+          } > body.md
+          cat body.md
+
+      - name: Open or update the issue
+        if: steps.versions.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          gh label create opencode-compat \
+            --color 1D76DB \
+            --description "A new OpenCode release needs checking" 2>/dev/null || true
+          # One issue per version: an open issue for this version is the latch, so
+          # the scheduled run does not reopen what a person already read.
+          existing=$(gh issue list --label opencode-compat --state open \
+            --search "OpenCode $LATEST compatibility in:title" \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file body.md
+            echo "Updated issue #$existing"
+          else
+            # Assigned to the owner so the notification is an email, not just a
+            # line in a repository nobody is watching.
+            gh issue create \
+              --title "OpenCode $LATEST compatibility" \
+              --label opencode-compat \
+              --assignee "${{ github.repository_owner }}" \
+              --body-file body.md
+          fi
+
+      - name: Notify a webhook, if one is configured
+        if: steps.versions.outputs.changed == 'true' && steps.verdict.outputs.status == 'incompatible'
+        env:
+          WEBHOOK: ${{ secrets.COMPAT_WEBHOOK_URL }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "No COMPAT_WEBHOOK_URL secret; the issue is the notification."
+            exit 0
+          fi
+          curl -fsS -X POST "$WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"opencode-vitals is incompatible with @opencode/plugin $LATEST\"}"

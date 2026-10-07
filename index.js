@@ -1672,12 +1672,17 @@ function createState(rawOptions, context = {}) {
   }
 }
 
-// Exported for the plugin's own test suite; OpenCode only uses the default
-// export. Only what a test actually reaches is listed here: an export nothing
-// reads is a second copy of the truth, and it goes stale silently.
+// Exported for the plugin's own test suite and the OpenCode compatibility
+// check; OpenCode only uses the default export. Only what a test or that check
+// actually reaches is listed here: an export nothing reads is a second copy of
+// the truth, and it goes stale silently. The ignored sets are read by
+// scripts/compat.mjs, which compares every name below against the event schema
+// of a new OpenCode release.
 export const vitalsInternals = {
   RESPONSE_MARKER_TTL_MS,
   HANDLED_TYPES,
+  IGNORED_TYPES,
+  IGNORED_PREFIXES,
   SESSION_TOTALS_FILE,
   STATUS_DIR,
   withStorageLock,

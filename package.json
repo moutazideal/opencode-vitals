@@ -33,7 +33,13 @@
   ],
   "scripts": {
     "test": "node tests/vitals.test.mjs",
+    "test:compat": "node tests/compat.test.mjs",
+    "compat": "node scripts/compat.mjs",
     "prepublishOnly": "npm test"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.24",
+    "@opencode/schema": "2.0.24"
   },
   "keywords": [
     "opencode",

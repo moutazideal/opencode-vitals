@@ -81,7 +81,8 @@ const TYPES = {
 // hashed chunks — `migration-status-*.js` is the one it asks for first — and a
 // `no-store` answer to that request was a fatal "Failed to fetch dynamically
 // imported module". With the chunks kept, the request is answered from the
-// window's own cache and the gap never reaches it.
+// window's own cache and the gap never reaches it. docs/readout-lifetime.md has
+// the alternatives that were considered and why none of them won.
 const HASHED_ASSET = /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/
 const cacheControlFor = (name) => (HASHED_ASSET.test(name) ? "public, max-age=31536000, immutable" : "no-store")
 

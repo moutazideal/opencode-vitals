@@ -2728,16 +2728,26 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   writeBundle("old-chunk.js")
   const { serve, syncRenderer, readoutInternals } = await import(`../readout.mjs?prev=${Date.now()}`)
   check("the first build makes a copy", syncRenderer().ok === true)
-  writeBundle("new-chunk.js")
+  writeBundle("new-chunk-B1_1SgTN.js")
   check("an update rebuilds the copy", syncRenderer().changed === true)
 
   const port = readoutInternals.PORT + 3
   const server = serve({ getSession: () => ({ sessionID: null, totals: null }), port })
   for (let attempt = 0; attempt < 40 && !server.listening; attempt += 1) await wait(25)
-  const status = async (path) => (await fetch(`http://127.0.0.1:${port}${path}`)).status
-  check("the new chunk is served from the current copy", (await status("/assets/new-chunk.js")) === 200)
+  const response = async (path) => fetch(`http://127.0.0.1:${port}${path}`)
+  const status = async (path) => (await response(path)).status
+  check("the new chunk is served from the current copy", (await status("/assets/new-chunk-B1_1SgTN.js")) === 200)
   check("the previous chunk is served from the kept copy", (await status("/assets/old-chunk.js")) === 200)
   check("a chunk in neither copy is still a 404", (await status("/assets/never-existed.js")) === 404)
+  // The window must be allowed to keep a content-addressed chunk. An OpenCode
+  // update restarts the service the readout server lives in, and during that gap
+  // the window's own hashed chunks have to come from its cache rather than the
+  // port that is answering nothing — the fatal "Failed to fetch dynamically
+  // imported module". The shell and a file the build did not hash are re-fetched.
+  const immutable = "public, max-age=31536000, immutable"
+  check("a hashed chunk is kept by the window", (await response("/assets/new-chunk-B1_1SgTN.js")).headers.get("cache-control") === immutable, String((await response("/assets/new-chunk-B1_1SgTN.js")).headers.get("cache-control")))
+  check("an unhashed file is not kept", (await response("/assets/old-chunk.js")).headers.get("cache-control") === "no-store")
+  check("the shell is not kept", (await response("/")).headers.get("cache-control") === "no-store")
   await new Promise((resolve) => server.close(resolve))
 
   if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
@@ -2747,6 +2757,20 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   if (previousData === undefined) delete process.env.XDG_DATA_HOME
   else process.env.XDG_DATA_HOME = previousData
   rmSync(home, { recursive: true, force: true })
+}
+
+// The cache rule itself, pinned. What the window may keep is decided by the name
+// alone, and the names that must never be kept are the ones a plugin update
+// changes in place: the shell, the readout script, and the two fonts the app's
+// build did not hash.
+{
+  const { readoutInternals } = await import(`../readout.mjs?cache=${Date.now()}`)
+  const { cacheControlFor } = readoutInternals
+  const immutable = "public, max-age=31536000, immutable"
+  check("a content-addressed chunk may be kept", cacheControlFor("migration-status-pqLWimLz.js") === immutable, cacheControlFor("migration-status-pqLWimLz.js"))
+  check("the shell may not be kept", cacheControlFor("index.html") === "no-store")
+  check("the readout script may not be kept", cacheControlFor("vitals.js") === "no-store")
+  check("a font the build did not hash may not be kept", cacheControlFor("Inter.ttf") === "no-store")
 }
 
 // The check count printed in the page is a claim like any other, so it is

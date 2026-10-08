@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2026-10-08
+
+An OpenCode update no longer greets the window with an error on the way back in.
+
+### Fixed
+
+- **The first start after an OpenCode update could show "Something went wrong".**
+  The readout server runs inside OpenCode's background service, and an update
+  restarts that service: for the moment between the old service closing and the
+  new one binding, nothing answers on the readout's port. A window that had
+  already loaded the previous interface — which is what the app does while the
+  service restarts — then asks for its own hashed chunks, and the first it asks
+  for is the migration screen's. With every answer a `no-store`, that request
+  went to a port that was not listening, and the renderer treated it as fatal.
+  Content-addressed assets are now served as immutable, so the window answers
+  its own chunk requests from its cache and the gap never reaches it. The shell,
+  the readout script and the two fonts the app's build does not hash stay
+  `no-store`, so a plugin update is still picked up at once.
+
+### Measured
+
+- 439 checks, up from 432.
+
 ## [0.1.13] - 2026-10-06
 
 An OpenCode update no longer breaks the window it was loaded into.

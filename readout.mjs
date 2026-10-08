@@ -66,6 +66,25 @@ const TYPES = {
   ".txt": "text/plain; charset=utf-8",
 }
 
+// What the window is allowed to keep, and for how long.
+//
+// Every file the build emits is content-addressed — `main-B1_1SgTN.js`,
+// `migration-status-Dh5dTlMu.js` — so the same name can never hold different
+// bytes, and the window may keep it forever without ever revalidating. The
+// shell, the readout script and the two fonts the build did not hash are not,
+// so they are re-fetched every time.
+//
+// This is not only a speed choice. An OpenCode update restarts the background
+// service, and the readout server lives inside it: for the moment between the
+// old service closing and the new one binding, port 8971 answers nothing. A
+// window that loaded the previous copy during that gap still asks for its own
+// hashed chunks — `migration-status-*.js` is the one it asks for first — and a
+// `no-store` answer to that request was a fatal "Failed to fetch dynamically
+// imported module". With the chunks kept, the request is answered from the
+// window's own cache and the gap never reaches it.
+const HASHED_ASSET = /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/
+const cacheControlFor = (name) => (HASHED_ASSET.test(name) ? "public, max-age=31536000, immutable" : "no-store")
+
 // -- finding the app ---------------------------------------------------------
 
 // Candidates rather than one path: the app is packaged differently per platform
@@ -644,7 +663,7 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
     // that would have been a 404 is the request that repairs it.
     if (!found) found = ensureCopy() ? find() : null
     if (found) {
-      response.writeHead(200, { "Content-Type": TYPES[found.slice(found.lastIndexOf("."))] ?? "application/octet-stream", "Cache-Control": "no-store" })
+      response.writeHead(200, { "Content-Type": TYPES[found.slice(found.lastIndexOf("."))] ?? "application/octet-stream", "Cache-Control": cacheControlFor(name) })
       serveAsset(response, found)
       return
     }
@@ -677,6 +696,7 @@ export const readoutInternals = {
   PORT,
   SCRIPT_TAG,
   MARKER,
+  cacheControlFor,
   systemEntryDirs,
   appCandidates,
   findApp,

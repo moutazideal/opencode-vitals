@@ -1,7 +1,7 @@
 {
   "name": "opencode-vitals",
   "version": "0.2.0",
-  "description": "OpenCode V2 plugin that shows session turns, steps, and average streaming tok/s inside OpenCode's own composer",
+  "description": "OpenCode V2 plugin that shows session turns, steps, and average streaming tok/s inside OpenCode's own composer, and fixes Arabic (RTL) text direction in messages and the prompt box",
   "author": {
     "name": "Moutaz Darwesh",
     "url": "https://github.com/moutazideal"
@@ -54,7 +54,14 @@
     "observability",
     "session-metrics",
     "composer",
-    "in-app"
+    "in-app",
+    "arabic",
+    "arabic-support",
+    "rtl",
+    "right-to-left",
+    "bidi",
+    "unicode-bidi",
+    "i18n"
   ],
   "repository": {
     "type": "git",

@@ -1357,7 +1357,8 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // exactly the details that make a launcher work.
   const system = { name: "ai.opencode.desktop.desktop", exec: "/opt/OpenCode/ai.opencode.desktop %U", body: "[Desktop Entry]\nName=OpenCode\nExec=/opt/OpenCode/ai.opencode.desktop %U\nIcon=ai.opencode.desktop\nStartupWMClass=ai.opencode.desktop\n" }
   const marked = markedEntryBody(system, appBinary(system, "/opt/OpenCode/resources/app.asar"))
-  check("launcher: Exec points at the readout server", marked.includes(`Exec=env ELECTRON_RENDERER_URL=http://127.0.0.1:${readoutInternals.PORT} /opt/OpenCode/ai.opencode.desktop %U`), marked.split("\n")[2])
+  check("launcher: Exec runs the readout host, not the app", marked.includes(`Exec=env ELECTRON_RUN_AS_NODE=1 /opt/OpenCode/ai.opencode.desktop "${readoutInternals.HOST_SCRIPT}" --launch %U`), marked.split("\n")[2])
+  check("launcher: the app is no longer launched directly", !marked.includes("Exec=env ELECTRON_RENDERER_URL"), marked.split("\n")[2])
   check("launcher: the icon is carried over", marked.includes("Icon=ai.opencode.desktop"))
   check("launcher: the WM class is carried over", marked.includes("StartupWMClass=ai.opencode.desktop"))
   check("launcher: it is marked as ours", marked.includes("X-OpenCode-Vitals=readout"))
@@ -2771,6 +2772,54 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("the shell may not be kept", cacheControlFor("index.html") === "no-store")
   check("the readout script may not be kept", cacheControlFor("vitals.js") === "no-store")
   check("a font the build did not hash may not be kept", cacheControlFor("Inter.ttf") === "no-store")
+}
+
+// Two readout servers on one port is the point of the launcher host: an OpenCode
+// update restarts the service the plugin's server lives in, and the host keeps
+// answering for the window's whole life. `reusePort` is what lets them coexist.
+{
+  const { serve, readoutInternals } = await import(`../readout.mjs?reuse=${Date.now()}`)
+  const port = readoutInternals.PORT + 4
+  const first = serve({ getSession: () => ({ sessionID: null, totals: null }), port })
+  const second = serve({ getSession: () => ({ sessionID: null, totals: null }), port })
+  for (let attempt = 0; attempt < 40 && !(first.listening && second.listening); attempt += 1) await wait(25)
+  check("reusePort: a second listener may share the readout port", first.listening && second.listening, `${first.listening} ${second.listening}`)
+  const status = async (path) => (await fetch(`http://127.0.0.1:${port}${path}`)).status
+  check("reusePort: the health probe answers", (await status("/__vitals-health")) === 204)
+  check("reusePort: the numbers answer", (await status("/vitals?session=ses_none")) === 200)
+  await new Promise((resolve) => first.close(resolve))
+  await new Promise((resolve) => second.close(resolve))
+}
+
+// The launcher host: the totals it serves from the file the plugin publishes, and
+// the launch that points the window at a server before it opens.
+{
+  const { readTotals, launch } = await import(`../host.mjs?host=${Date.now()}`)
+  const { readoutInternals } = await import(`../readout.mjs?hostport=${Date.now()}`)
+  const totalsFile = join(tmpdir(), "opencode-latency-monitor", "session-totals.json")
+  mkdirSync(dirname(totalsFile), { recursive: true })
+  const saved = existsSync(totalsFile) ? readFileSync(totalsFile, "utf8") : null
+  writeFileSync(totalsFile, JSON.stringify({ version: 1, sessions: { ses_x: { turns: 3, steps: 5, outputTokens: 900, tokensPerSecond: 120.5, recentRates: [100, 120.5], subagentSteps: 1, updatedAt: "t" } } }))
+  const answered = readTotals("ses_x")
+  check("host: the totals come from the published file", answered.sessionID === "ses_x" && answered.totals.turns === 3 && answered.totals.tokensPerSecond === 120.5, JSON.stringify(answered))
+  check("host: a session with no totals is null, not a neighbour's numbers", readTotals("ses_none").totals === null)
+  check("host: no session is a null answer", readTotals(null).sessionID === null)
+  if (saved === null) rmSync(totalsFile, { force: true })
+  else writeFileSync(totalsFile, saved)
+
+  // The launch itself, with the server and the probe injected so no port is
+  // opened and no real server is consulted here.
+  const launched = []
+  const noServer = await launch(["--flag"], { app: "/opt/OpenCode/ai.opencode.desktop", start: async () => null, health: async () => false, spawn: (app, args, options) => { launched.push({ app, args, options }); return { on() {} } } })
+  check("host: the app is launched", typeof noServer?.on === "function" && launched.length === 1)
+  check("host: the app is the binary this process runs under", launched[0].app === "/opt/OpenCode/ai.opencode.desktop")
+  check("host: the launcher's own arguments reach the app", launched[0].args[0] === "--flag")
+  check("host: ELECTRON_RUN_AS_NODE is not passed on to the app", !("ELECTRON_RUN_AS_NODE" in launched[0].options.env))
+  check("host: with nothing listening and nothing to start, the window is not pointed anywhere", !("ELECTRON_RENDERER_URL" in launched[0].options.env))
+  await launch([], { start: async () => ({ close() {} }), health: async () => false, spawn: (app, args, options) => { launched.push({ options }); return { on() {} } } })
+  check("host: with a server of its own, the window is pointed at it", launched[1].options.env.ELECTRON_RENDERER_URL === `http://127.0.0.1:${readoutInternals.PORT}`)
+  await launch([], { start: async () => null, health: async () => true, spawn: (app, args, options) => { launched.push({ options }); return { on() {} } } })
+  check("host: when something already answers, the window is still pointed at it", launched[2].options.env.ELECTRON_RENDERER_URL === `http://127.0.0.1:${readoutInternals.PORT}`)
 }
 
 // The check count printed in the page is a claim like any other, so it is

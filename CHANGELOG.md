@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15] - 2026-10-10
+
+A cold start no longer greets the window with a refused connection.
+
+### Fixed
+
+- **The first launch after a reboot could show "ERR_CONNECTION_REFUSED".** The
+  readout server runs inside OpenCode's background service, and the desktop
+  window is opened before that service has finished starting — on a cold start
+  the window asked for `http://127.0.0.1:8971/index.html` while nothing was
+  listening, and the window did not open at all. The launcher entry now starts a
+  small readout host first, using the app's own binary run as Node, so a server
+  is listening before the window is. The plugin's own server binds the same port,
+  and `reusePort` lets the two share it — so an OpenCode update, which restarts
+  the service the plugin lives in, cannot leave the window without one. If there
+  is no copy to serve, the window is opened without a readout rather than against
+  a port that answers nothing.
+
+### Changed
+
+- The package ships `host.mjs`, and the launcher entry runs it instead of the app
+  directly. It needs no runtime the machine might not have: it runs as Node
+  through the app's own Electron binary.
+
+### Measured
+
+- 453 checks, up from 439.
+
 ## [0.1.14] - 2026-10-08
 
 An OpenCode update no longer greets the window with an error on the way back in.

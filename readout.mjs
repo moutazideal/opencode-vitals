@@ -29,6 +29,10 @@ import { fileURLToPath } from "node:url"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const READOUT_SCRIPT = join(HERE, "renderer", "vitals.js")
+// The launcher's entry runs this instead of the app directly: it starts the
+// readout host, waits for it, and only then opens the window. That is what keeps
+// the window from loading a port that is not listening yet.
+const HOST_SCRIPT = join(HERE, "host.mjs")
 const MARKER = ".vitals-sync.json"
 
 // `?? ""` on HOME for the same reason update.mjs has it: a host that does not
@@ -43,7 +47,7 @@ const RENDERER_DIR = join(WORK_DIR, "renderer")
 // copy it loaded.
 const PREVIOUS_RENDERER_DIR = `${RENDERER_DIR}.old`
 const DESKTOP_DIR = join(DATA_HOME, "applications")
-const PORT = Number(process.env.OPENCODE_VITALS_PORT ?? 8971)
+export const PORT = Number(process.env.OPENCODE_VITALS_PORT ?? 8971)
 
 // The app's own renderer entry point, and the tag that pulls our script in. The
 // tag goes beside the app's bundle, never inside it: the bundle is a build
@@ -476,7 +480,7 @@ function appBinary(systemEntry, app) {
 
 function markedEntryBody(systemEntry, binary) {
   return systemEntry.body
-    .replace(/^Exec=.*$/m, `Exec=env ELECTRON_RENDERER_URL=http://127.0.0.1:${PORT} ${binary} %U`)
+    .replace(/^Exec=.*$/m, `Exec=env ELECTRON_RUN_AS_NODE=1 ${binary} "${HOST_SCRIPT}" --launch %U`)
     .trimEnd()
     .concat("\nX-OpenCode-Vitals=readout\n")
 }
@@ -618,6 +622,15 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
       return
     }
 
+    // A readiness probe for the launcher host. It answers only when a server is
+    // listening, which is exactly what the host has to know before it decides to
+    // start one of its own: two servers on one port is the point of `reusePort`,
+    // and two is one more than this needs.
+    if (pathname === "/__vitals-health") {
+      response.writeHead(204, { "Cache-Control": "no-store" }).end()
+      return
+    }
+
     if (pathname === "/vitals") {
       let payload
       try {
@@ -681,8 +694,26 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
     createReadStream(shell).pipe(response)
   })
 
-  server.on("error", (error) => onError?.(error))
-  server.listen(port ?? PORT, "127.0.0.1", () => onListen?.(port ?? PORT))
+  // Two listeners on one port is deliberate. The readout server lives in the
+  // OpenCode service, which an update restarts; a launcher host owns the same
+  // port for the window's whole life, so the window never meets a moment when
+  // nothing is listening. `reusePort` is what lets the two coexist, and a runtime
+  // that does not know it falls back to one listener — the host's.
+  const bind = () => ({ port: port ?? PORT, host: "127.0.0.1" })
+  let triedReuse = true
+  server.on("error", (error) => {
+    if (triedReuse) {
+      triedReuse = false
+      try {
+        server.listen(bind(), () => onListen?.(port ?? PORT))
+        return
+      } catch {
+        // Fall through: the plain bind failed too, and the caller decides.
+      }
+    }
+    onError?.(error)
+  })
+  server.listen({ ...bind(), reusePort: true }, () => onListen?.(port ?? PORT))
   // A listening socket is a handle that keeps the event loop alive. The plugin
   // host is long-lived and would not care, but anything that imports this — a
   // test run, a script — would hang on exit with nothing left to do.
@@ -697,6 +728,7 @@ export const readoutInternals = {
   PORT,
   SCRIPT_TAG,
   MARKER,
+  HOST_SCRIPT,
   cacheControlFor,
   systemEntryDirs,
   appCandidates,

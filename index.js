@@ -127,6 +127,10 @@ function withTimeout(promise, milliseconds) {
 // and no lock to lose; what remains is keeping a copy of the app's renderer in
 // step with the app, and answering for the session the window says it is showing.
 let readoutServer = null
+// Set when this process could not bind the readout port because the launcher
+// host already owns it. That is not a failure: the host serves the window for
+// its whole life, so the entry that starts it must stay.
+let readoutHostServing = false
 // Latches so a persistent failure is reported once rather than every second.
 let readoutPlacementWarned = false
 // The same latch for the launcher entry: a machine with no desktop app is a
@@ -171,7 +175,7 @@ function syncReadout() {
 // own UI: the readout degrades to nothing, never to a broken editor.
 async function ensureReadoutEntry(state, ctx, synced) {
   const result = synced ?? syncReadout()
-  const serving = result.ok && Boolean(readoutServer)
+  const serving = result.ok && (Boolean(readoutServer) || readoutHostServing)
   if (serving) {
     const entry = installDesktopEntry()
     if (entry.ok) {
@@ -222,6 +226,13 @@ function startReadout(state) {
         if (placed) readoutPlacementWarned = false
       },
       onError: (error) => {
+        // The launcher host owns the same port for the window's whole life, so a
+        // bind failure here means it is already serving. Removing the entry over
+        // that would take the readout away for every launch after this one.
+        if (error?.code === "EADDRINUSE") {
+          readoutHostServing = true
+          return
+        }
         readoutServer = null
         state.warn(null, `readout server stopped: ${String(error)}`)
         // Nothing may point at a server that is not listening.

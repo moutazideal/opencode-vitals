@@ -2783,7 +2783,13 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const first = serve({ getSession: () => ({ sessionID: null, totals: null }), port })
   const second = serve({ getSession: () => ({ sessionID: null, totals: null }), port })
   for (let attempt = 0; attempt < 40 && !(first.listening && second.listening); attempt += 1) await wait(25)
-  check("reusePort: a second listener may share the readout port", first.listening && second.listening, `${first.listening} ${second.listening}`)
+  // `reusePort` is a Node 22.12+/Bun feature. Where the runtime lacks it the
+  // second listener cannot bind at all — which is the case the plugin handles by
+  // treating EADDRINUSE as the host already serving. Here it must at least fail
+  // quietly rather than crash, so both branches are asserted.
+  const node = (process.versions.node ?? "0").split(".").map(Number)
+  const reuse = Boolean(process.versions.bun) || node[0] > 22 || (node[0] === 22 && node[1] >= 12)
+  check("reusePort: a second listener shares the port where the runtime supports it", reuse ? first.listening && second.listening : first.listening && !second.listening, `reuse=${reuse} ${first.listening} ${second.listening}`)
   const status = async (path) => (await fetch(`http://127.0.0.1:${port}${path}`)).status
   check("reusePort: the health probe answers", (await status("/__vitals-health")) === 204)
   check("reusePort: the numbers answer", (await status("/vitals?session=ses_none")) === 200)

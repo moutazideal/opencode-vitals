@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.18] - 2026-10-10
+
+The readout comes back by itself when the server it deferred to goes away.
+
+### Fixed
+
+- **The readout could stay dark until the whole service was reloaded.** When the
+  plugin's own bind was refused with `EADDRINUSE` it latched "the launcher host
+  owns the port" and never tried again — but the host lives only as long as the
+  window it opened, so once it exited nothing served, the running window lost the
+  page it was loading, and the row vanished. A liveness probe now checks every few
+  seconds whether the port actually answers; if it does not, the plugin stops
+  trusting the host and takes the port back. The probe waits five seconds rather
+  than half a second, because a server that is briefly busy is not a server that
+  is gone.
+- A refused bind no longer leaves a server object behind that made the plugin
+  think it was serving — which is also what kept the probe above from running.
+- The launcher host's own readiness probe uses the same five-second patience.
+
+### Measured
+
+- 485 checks, up from 482.
+
 ## [0.1.17] - 2026-10-10
 
 An audit of the measurement and the installer. Nothing here changes what the

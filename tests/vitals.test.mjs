@@ -3026,6 +3026,38 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("a reload of one location does not leak its instance", whileBoth === 204 && afterReload === null, JSON.stringify({ whileBoth, afterReload }))
 }
 
+// A server that goes away is taken back, not waited on forever. The plugin used
+// to latch "the launcher host owns the port" on the first EADDRINUSE and never
+// bind again, so once that host exited the readout stayed dark until the whole
+// service was reloaded — which is exactly what a restart showed.
+{
+  const probe = async () => fetch(`http://127.0.0.1:${READOUT_PORT}/__vitals-health`, { signal: AbortSignal.timeout(1500) })
+    .then((response) => response.status)
+    .catch(() => null)
+  // A foreign listener that holds the port without reusePort and does not
+  // answer: the plugin's bind is refused and its probe cannot get an answer
+  // either. Connections are dropped rather than left hanging, so closing it
+  // below is immediate.
+  const blocker = createServer((socket) => socket.destroy())
+  await new Promise((resolve) => blocker.listen(READOUT_PORT, "127.0.0.1", resolve))
+  const { storage, cleanup } = await run([], { pluginOptions: { popup: true } })
+  await wait(300)
+  check("while a foreign listener holds the port, the readout is not served", (await probe()) === null, JSON.stringify(await probe()))
+  // The host it deferred to is gone.
+  await new Promise((resolve) => blocker.close(() => resolve()))
+  // The revive timer notices and takes the port back on its own.
+  let recovered = null
+  const deadline = Date.now() + 25_000
+  while (Date.now() < deadline && recovered === null) {
+    await wait(500)
+    recovered = await probe()
+  }
+  check("and when it is gone, the readout takes the port back without a restart", recovered === 204, JSON.stringify(recovered))
+  cleanup()
+  await wait(200)
+  check("cleanup releases it again", (await probe()) === null, JSON.stringify(await probe()))
+}
+
 // A malformed request target used to throw out of the request handler and take
 // the whole server process with it.
 {

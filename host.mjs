@@ -59,7 +59,7 @@ export function readTotals(sessionID) {
 // window is not the only server that may be there — the plugin's own is usually
 // up on a warm start, and the window must be pointed at it whether or not this
 // process managed to bind.
-async function healthy({ port = PORT, timeoutMs = 500, fetch: request = fetch } = {}) {
+async function healthy({ port = PORT, timeoutMs = 5000, fetch: request = fetch } = {}) {
   try {
     const response = await request(`http://127.0.0.1:${port}/__vitals-health`, { signal: AbortSignal.timeout(timeoutMs) })
     return Boolean(response?.ok)

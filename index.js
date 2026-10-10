@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { installDesktopEntry, removeDesktopEntry, serve, syncRenderer } from "./readout.mjs"
+import { PORT, installDesktopEntry, removeDesktopEntry, serve, syncRenderer } from "./readout.mjs"
 import { START_DELAY_MS, updateIfNeeded } from "./update.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
@@ -39,6 +39,15 @@ const MARKER_PRUNE_INTERVAL_MS = 60 * 1000
 // lock to lose and no backoff to get wrong. What is left is a sync of the app's
 // renderer copy, which is cheap and happens only when the app itself changes.
 const READOUT_SYNC_INTERVAL_MS = 10 * 60 * 1000
+// How often to check that a server is actually answering, and take the port back
+// if it is not. A plugin that bound once and stayed bound never needed this; a
+// plugin that deferred to the launcher host and then watched it go away did — and
+// without it the readout stayed dark until the whole service was reloaded.
+const READOUT_REVIVE_INTERVAL_MS = 5 * 1000
+// How long a liveness probe waits before it decides the port is not answering.
+// Generous, because a server that is up but briefly busy is not a server that is
+// gone, and closing the readout over a slow moment is the mistake to avoid.
+const READOUT_PROBE_TIMEOUT_MS = 5 * 1000
 const SESSION_CONTEXT_TIMEOUT_MS = 3000
 // A stream that stops for longer than this and then continues under the same
 // message id was interrupted (a reconnect, a resumed generation). The idle gap
@@ -134,9 +143,12 @@ function withTimeout(promise, milliseconds) {
 // step with the app, and answering for the session the window says it is showing.
 let readoutServer = null
 // Set when this process could not bind the readout port because the launcher
-// host already owns it. That is not a failure: the host serves the window for
-// its whole life, so the entry that starts it must stay.
+// host already owns it. That is not a failure, but it is also not permanent: the
+// host lives only as long as the window it opened, so this is a claim about now
+// and is re-checked (see reviveReadout) rather than believed forever.
 let readoutHostServing = false
+// True while a revive probe is in flight, so the timer cannot stack them.
+let readoutReviving = false
 // Latches so a persistent failure is reported once rather than every second.
 let readoutPlacementWarned = false
 // The same latch for the launcher entry: a machine with no desktop app is a
@@ -221,6 +233,8 @@ function startReadout(state) {
   if (!readoutServer) {
     readoutServer = serve({
       getSession: totalsForSession,
+      // Our own socket is listening, whatever we believed a moment ago.
+      onListen: () => { readoutHostServing = false },
       onStatus: ({ placed, detail }) => {
         // Once, and only when it is wrong. This is the only signal that the app
         // renamed the slot the readout hangs on, and the symptom is a row that
@@ -234,9 +248,13 @@ function startReadout(state) {
       onError: (error) => {
         // The launcher host owns the same port for the window's whole life, so a
         // bind failure here means it is already serving. Removing the entry over
-        // that would take the readout away for every launch after this one.
+        // that would take the readout away for every launch after this one. But
+        // this server never bound, so it is not the one that answers — the flag
+        // says who is, and `readoutServer` has to stay null for reviveReadout to
+        // know it has something to do.
         if (error?.code === "EADDRINUSE") {
           readoutHostServing = true
+          readoutServer = null
           return
         }
         readoutServer = null
@@ -247,6 +265,46 @@ function startReadout(state) {
     })
   }
   return syncReadout()
+}
+
+// Does something actually answer on the readout port? A bind that was refused
+// once ("the host owns it") is a claim about the moment, and the host it named
+// may be gone by the next moment. This is what tells the two apart.
+async function readoutAnswers({ timeoutMs = READOUT_PROBE_TIMEOUT_MS } = {}) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/__vitals-health`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    return Boolean(response?.ok)
+  } catch {
+    return false
+  }
+}
+
+// If nobody is answering, take the port back. This runs on its own short timer
+// rather than only on the ten-minute sync, because the failure it repairs — the
+// readout going dark while a window is open — is one a person notices at once.
+async function reviveReadout(state, ctx) {
+  if (readoutServer || readoutReviving) return
+  readoutReviving = true
+  try {
+    if (await readoutAnswers()) {
+      // The launcher host is genuinely serving; leave it alone.
+      readoutHostServing = true
+      return
+    }
+    // Nothing is listening. Stop trusting the host and try to bind ourselves.
+    readoutHostServing = false
+    const synced = startReadout(state)
+    try {
+      await ensureReadoutEntry(state, ctx, synced)
+    } catch (error) {
+      state.warn(ctx, `readout launcher entry: ${String(error)}`)
+    }
+  } finally {
+    readoutReviving = false
+  }
 }
 
 // -- a reply in flight --------------------------------------------------------
@@ -1822,12 +1880,15 @@ export default {
     // here; the shared server is left alone, because other projects may use it.
     if (runtime.markerTimer) clearInterval(runtime.markerTimer)
     runtime.markerTimer = null
+    if (runtime.reviveTimer) clearInterval(runtime.reviveTimer)
+    runtime.reviveTimer = null
     if (runtime.state) readoutStates.delete(runtime.state)
     runtime.state = null
     const controller = new AbortController()
     runtime.controller = controller
     const state = createState(ctx.options, { project })
     let companionTimer = null
+    let reviveTimer = null
     let markerTimer = null
     // The update check, deliberately late and deliberately cancellable. Late,
     // because a launch that stalls behind a package manager is a launch that
@@ -1849,6 +1910,8 @@ export default {
         clearInterval(companionTimer)
         runtime.companionTimer = null
       }
+      if (reviveTimer) clearInterval(reviveTimer)
+      if (runtime.reviveTimer === reviveTimer) runtime.reviveTimer = null
       if (markerTimer) clearInterval(markerTimer)
       if (runtime.markerTimer === markerTimer) runtime.markerTimer = null
       if (updateTimer) clearTimeout(updateTimer)
@@ -1911,6 +1974,12 @@ export default {
         }, READOUT_SYNC_INTERVAL_MS)
         companionTimer.unref?.()
         runtime.companionTimer = companionTimer
+        // Kept apart from the sync on purpose: a liveness check is cheap and the
+        // failure it repairs is not one to wait ten minutes for. It does nothing
+        // while this process is serving.
+        reviveTimer = setInterval(() => { void reviveReadout(state, ctx) }, READOUT_REVIVE_INTERVAL_MS)
+        reviveTimer.unref?.()
+        runtime.reviveTimer = reviveTimer
       } catch (error) {
         state.warn(ctx, `readout unavailable; measurement continues: ${String(error)}`)
       }

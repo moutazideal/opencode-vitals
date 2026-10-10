@@ -570,7 +570,7 @@ To install a copy of the checkout instead, drop the `--link`. To put it somewher
 ### Development
 
 ```bash
-npm test                 # 482 checks
+npm test                 # 485 checks
 npm run test:compat      # the compatibility check's own logic
 npm run compat           # this plugin against the pinned OpenCode API
 node selftest.mjs        # can this machine show the readout?

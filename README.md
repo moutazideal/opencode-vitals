@@ -658,6 +658,16 @@ ran at the same speed, a fingerprint that has to cover the bundles under
 tokens were counted while the time spent writing its tool call was not, and both
 config files when a machine has one of each.
 
+## Community
+
+- [Contributing](CONTRIBUTING.md) — how the code is meant to be changed, and the
+  rules the suite enforces.
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md) — the trust model, and how to report a problem
+  privately.
+- [Accessibility](ACCESSIBILITY.md) — what this does for readers, its known
+  limitations, and how to report a barrier.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

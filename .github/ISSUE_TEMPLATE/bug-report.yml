@@ -1,58 +1,79 @@
 name: Bug report
-about: Something behaves differently from what the README says
+description: Something behaves differently from what the README says
 title: "[bug] "
-labels: ""
-body: |
-  ## What happened
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The two commands below answer most of the question
+        on their own; both write nothing. Please do not paste conversation text
+        (prompts or responses) — this plugin does not store it, and a report
+        should not either. Timings, counts and identifiers are enough.
 
-  ## What I expected instead
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What you did, and what you saw.
+    validations:
+      required: true
 
-  ## Your machine
+  - type: textarea
+    id: expected
+    attributes:
+      label: What I expected instead
+    validations:
+      required: true
 
-  - operating system and version:
-  - OpenCode version:
-  - Node version (`node --version`):
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+    validations:
+      required: true
 
-  ## Selftest output
+  - type: input
+    id: opencode
+    attributes:
+      label: OpenCode version
 
-  This is the fastest way to see why. Please paste the whole thing. It writes
-  nothing.
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: The output of `node --version`.
 
-  ```bash
-  npx opencode-vitals@latest selftest
-  ```
+  - type: textarea
+    id: selftest
+    attributes:
+      label: Selftest output
+      description: Run `npx opencode-vitals@latest selftest` and paste the whole output.
+      render: shell
+    validations:
+      required: true
 
-  ```
-  (paste here)
-  ```
+  - type: textarea
+    id: installed
+    attributes:
+      label: What is installed
+      description: If the readout is not appearing at all, paste `npx opencode-vitals@latest status` and `opencode plugin list`.
+      render: shell
 
-  ## What is installed
+  - type: textarea
+    id: startup
+    attributes:
+      label: If OpenCode will not start
+      description: |
+        The plugin points the app's launcher at a local server, so if that server
+        has nothing to serve the window comes up empty. One command undoes it, and
+        is safe to run before reporting anything: `rm -f ~/.local/share/applications/ai.opencode.desktop.desktop`.
+        Say here whether you ran it, and whether the app opened after.
+      render: text
 
-  If the readout is not appearing at all, this says which of the two shapes is
-  installed and whether it can update itself:
-
-  ```bash
-  npx opencode-vitals@latest status
-  opencode plugin list
-  ```
-
-  ```
-  (paste here)
-  ```
-
-  ## If OpenCode will not start
-
-  The plugin points the app's launcher at a local server, so if that server has
-  nothing to serve the window comes up empty. One command undoes it, and is safe
-  to run before reporting anything:
-
-  ```bash
-  rm -f ~/.local/share/applications/ai.opencode.desktop.desktop
-  ```
-
-  Please say in the report whether you ran it, and whether the app opened after.
-
-  ## Please do not paste conversation text
-
-  This plugin never stores prompts or responses, and a report should not
-  either. Timings, counts and identifiers are enough to find the problem.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I have not pasted any conversation text (prompts or responses).
+          required: true

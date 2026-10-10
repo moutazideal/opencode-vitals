@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest something the readout or the Arabic fix should do
+title: "[feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you write: two constraints shape what is possible here, and knowing
+        them saves a round trip.
+
+        - **There is one launcher entry.** It is what points OpenCode at the fixed
+          renderer, so anything that needs the window to load from somewhere else
+          has to live in that one entry. Two plugins cannot both own it.
+        - **The window is OpenCode's own.** Whatever is added runs inside the real
+          renderer and has to survive OpenCode renaming its own DOM between
+          releases. A feature that depends on one exact element may break on an
+          update.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve
+      description: Describe the situation, not the solution, if you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part is this about
+      options:
+        - The readout (turns, steps, tok/s)
+        - Arabic text direction
+        - Install, update or uninstall
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This does not require a second plugin to own the launcher entry.
+          required: false

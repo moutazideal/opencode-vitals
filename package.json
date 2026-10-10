@@ -1,6 +1,6 @@
 {
   "name": "opencode-vitals",
-  "version": "0.1.18",
+  "version": "0.2.0",
   "description": "OpenCode V2 plugin that shows session turns, steps, and average streaming tok/s inside OpenCode's own composer",
   "author": {
     "name": "Moutaz Darwesh",
@@ -23,6 +23,8 @@
     "host.mjs",
     "update.mjs",
     "renderer/vitals.js",
+    "renderer/arabic.css",
+    "renderer/arabic.js",
     "cli.mjs",
     "install.mjs",
     "selftest.mjs",

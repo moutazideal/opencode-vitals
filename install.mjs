@@ -116,6 +116,8 @@ const FALLBACK_FILES = [
   "host.mjs",
   "update.mjs",
   "renderer/vitals.js",
+  "renderer/arabic.css",
+  "renderer/arabic.js",
   "cli.mjs",
   "selftest.mjs",
   "install.mjs",

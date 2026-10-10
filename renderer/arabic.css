@@ -1,0 +1,113 @@
+/* OpenCode Arabic — text direction for messages and the composer.
+ *
+ * The goal is small and specific: when a message is Arabic it should read
+ * right-to-left and align to the right, and when it is English it should read
+ * left-to-right and align to the left — in the same conversation, without either
+ * one dragging the other around. Code, paths and shell output are never Arabic,
+ * so they stay pinned left even inside an Arabic paragraph.
+ *
+ * The mechanism is the standard one for mixed-direction text:
+ *   unicode-bidi: plaintext  — each block decides its own direction from its
+ *                              content, instead of inheriting one direction for
+ *                              the whole page;
+ *   text-align: start        — align to that block's own start, so an Arabic
+ *                              block sits on the right and an English one on the
+ *                              left with no rule per language.
+ *
+ * This overrides the app's own defaults rather than replacing them: the app
+ * already isolates code and sets `plaintext` on some blocks, and where it is
+ * already right, repeating it changes nothing. `!important` is used on the few
+ * declarations that decide direction, because a wrong direction is the whole
+ * problem and it must not lose a specificity tie with the app's own sheet.
+ *
+ * Nothing here touches the app's chrome (sidebar, titlebar, menus). Only the
+ * text of messages and the input are in scope.
+ */
+
+/* ------------------------------------------------------------------ messages */
+
+/* Assistant replies: the markdown container and every block in it. Each block
+ * is its own paragraph, so a list item or a heading in Arabic and a paragraph in
+ * English beside it are each laid out the way their own text reads. */
+[data-component="assistant-message"],
+[data-slot="session-turn-assistant-content"],
+[data-component="text-part"],
+[data-slot="text-part-body"],
+[data-component="markdown"],
+[data-component="markdown"] > *,
+[data-component="markdown"] > * > * {
+  unicode-bidi: plaintext !important;
+  text-align: start !important;
+}
+
+/* List markers and their text follow the same per-item direction. */
+[data-component="markdown"] ul,
+[data-component="markdown"] ol,
+[data-component="markdown"] li,
+[data-component="markdown"] blockquote {
+  unicode-bidi: plaintext !important;
+  text-align: start !important;
+}
+
+/* The user's own message. The app already sets `plaintext` here; the alignment
+ * is what is missing, so an Arabic prompt sits on the right of its bubble. */
+[data-slot="user-message-text"],
+[data-slot="user-message-text"] > * {
+  unicode-bidi: plaintext !important;
+  text-align: start !important;
+}
+
+/* Compaction summaries, retry notices and the turn's message frame are messages
+ * too, and read from the same data. */
+[data-slot="session-turn-compaction"],
+[data-slot="session-turn-compaction"] > *,
+[data-slot="session-turn-message-content"],
+[data-slot="session-turn-retry-message"],
+[data-slot="session-turn-retry-info"] {
+  unicode-bidi: plaintext !important;
+  text-align: start !important;
+}
+
+/* ------------------------------------------------------------------- LTR bits */
+
+/* Code, diffs, paths and shell output are left-to-right in every language. A
+ * reversed path or command is not "Arabic", it is wrong. They are isolated so
+ * the Arabic around them cannot reorder their punctuation. */
+[data-component="markdown-code"],
+[data-component="markdown-mermaid"],
+[data-component="markdown"] :not(pre) > code,
+[data-component="markdown"] pre,
+[data-component="markdown"] pre code,
+[data-component="shell-submessage"],
+[data-component="bash-output"],
+[data-slot="shell-submessage-value"],
+[data-component="tool-output"],
+[data-slot="session-turn-diff-path"],
+[data-slot="session-turn-diff-directory"],
+[data-slot="session-turn-diff-filename"],
+[data-slot="apply-patch-directory"],
+[data-slot="session-review-directory"] {
+  direction: ltr !important;
+  unicode-bidi: isolate !important;
+  text-align: left !important;
+}
+
+/* ----------------------------------------------------------------- composer */
+
+/* The prompt input. The app already sets `dir="auto"` on the editor, but
+ * `unicode-bidi: plaintext` adds the missing half: each line is laid out by its
+ * own first strong character, so an Arabic line typed under an English one does
+ * not inherit the English one's direction. `text-align: start` puts the caret's
+ * line against its own side. */
+[data-component="composer-editor"],
+[data-component="input"] [data-slot="input-input"] {
+  unicode-bidi: plaintext !important;
+  text-align: start !important;
+}
+
+/* Placeholder text is a hint in the interface's language, not the user's input,
+ * so it keeps the app's own direction and alignment. */
+[data-component="composer-editor"]:empty::before,
+[data-component="composer-editor"] [data-placeholder] {
+  unicode-bidi: plaintext;
+}

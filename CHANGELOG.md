@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-10
+
+Arabic text reads correctly in messages and the prompt box — folded into the same
+plugin, the same renderer copy and the same launcher entry as the readout, so it is
+one plugin instead of two.
+
+### Added
+
+- **Arabic text direction.** The renderer copy now also carries `arabic.css` and
+  `arabic.js` beside the readout:
+  - `unicode-bidi: plaintext` and `text-align: start` on message blocks (assistant
+    replies, user messages, compaction, retries) and the composer, so each block
+    reads and aligns by its own content;
+  - `direction: ltr` on code, diffs, paths and shell output, so those are never
+    reordered inside an Arabic paragraph;
+  - `dir="auto"` on message blocks, so an Arabic block becomes genuinely
+    right-to-left and OpenCode's own `:dir(rtl)` rules mirror its layout, while an
+    English block beside it stays left-to-right.
+- The three injected files (`vitals.js`, `arabic.css`, `arabic.js`) are copied and
+  hashed together, so a change to any of them reaches a copy whose app has not
+  moved. A copy missing any of them is no longer treated as ready, and a sync
+  rebuilds it.
+
+### Measured
+
+- 493 checks, up from 485.
+
 ## [0.1.18] - 2026-10-10
 
 The readout comes back by itself when the server it deferred to goes away.

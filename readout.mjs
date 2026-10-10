@@ -29,6 +29,19 @@ import { fileURLToPath } from "node:url"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const READOUT_SCRIPT = join(HERE, "renderer", "vitals.js")
+// The Arabic pair: a stylesheet that puts message text and the composer in the
+// right direction, and a tiny script that marks message blocks `dir="auto"` so
+// the app's own `:dir(rtl)` rules apply to them. They are copied into the renderer
+// copy and hashed with the readout, so a change to any of them reaches a copy
+// whose app has not moved.
+const ARABIC_STYLE = join(HERE, "renderer", "arabic.css")
+const ARABIC_SCRIPT = join(HERE, "renderer", "arabic.js")
+// Every file injected beside the app's bundle, as [name in the copy, source].
+const ASSETS = [
+  ["vitals.js", READOUT_SCRIPT],
+  ["arabic.css", ARABIC_STYLE],
+  ["arabic.js", ARABIC_SCRIPT],
+]
 // The launcher's entry runs this instead of the app directly: it starts the
 // readout host, waits for it, and only then opens the window. That is what keeps
 // the window from loading a port that is not listening yet.
@@ -60,6 +73,12 @@ export const PORT = validPort(process.env.OPENCODE_VITALS_PORT) ?? 8971
 // tag goes beside the app's bundle, never inside it: the bundle is a build
 // artefact and rewriting one would be undone by the next update anyway.
 const SCRIPT_TAG = '<script type="module" src="./vitals.js"></script>'
+// The Arabic fixes ride along with the readout: a stylesheet for text direction
+// in messages and the composer, and a script that marks message blocks
+// `dir="auto"`. Injected beside the app's bundle exactly like the readout.
+const ARABIC_TAG =
+  '<link rel="stylesheet" href="./arabic.css">\n    <script type="module" src="./arabic.js"></script>'
+const INJECT_TAG = `${SCRIPT_TAG}\n    ${ARABIC_TAG}`
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -200,16 +219,20 @@ function readMarker() {
   }
 }
 
-// The readout's own script is not the app's. A plugin update changes it while
-// the app stays put, so it is part of the copy's stamp: without it a new readout
-// never reached a copy whose app had not moved, and renderer fixes sat unused
-// until OpenCode itself updated.
-function readoutScriptHash() {
-  try {
-    return createHash("sha256").update(readFileSync(READOUT_SCRIPT)).digest("hex").slice(0, 16)
-  } catch {
-    return null
+// The files injected beside the bundle are not the app's. A plugin update changes
+// them while the app stays put, so they are part of the copy's stamp: without it a
+// new readout, or a new Arabic fix, never reached a copy whose app had not moved —
+// renderer fixes sat unused until OpenCode itself updated.
+function assetsHash() {
+  const hash = createHash("sha256")
+  for (const [name, source] of ASSETS) {
+    try {
+      hash.update(name).update(readFileSync(source))
+    } catch {
+      hash.update(`${name}:missing`)
+    }
   }
+  return hash.digest("hex").slice(0, 16)
 }
 
 function injectTag(html) {
@@ -221,7 +244,7 @@ function injectTag(html) {
   // so rather than injecting a tag that would never load.
   const anchor = /<script[^>]*type="module"[^>]*src="[^"]+"[^>]*><\/script>/
   if (!anchor.test(source)) return null
-  return source.replace(anchor, (match) => `${match}\n    ${SCRIPT_TAG}`)
+  return source.replace(anchor, (match) => `${match}\n    ${INJECT_TAG}`)
 }
 
 // Recursive: the app's renderer is a directory tree, and the assets the document
@@ -312,22 +335,27 @@ export function syncRenderer({ force = false } = {}) {
   const app = createHash("sha256").update(path).digest("hex").slice(0, 8)
   let stamp
   try {
-    stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
+    stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: assetsHash() }
   } catch (error) {
     return { ok: false, reason: `could not read ${path}: ${String(error)}` }
   }
   const previous = readMarker()
-  if (!force && previous && previous.app === stamp.app && previous.fingerprint === stamp.fingerprint) {
-    // The app is unchanged, but the readout script may not be: a plugin update
-    // changes it while the app stays put, so it is copied in on its own rather
-    // than rebuilding the whole interface for it.
-    if (previous.script !== stamp.script && rendererReady()) {
+  // The copy has to be intact as well as current: a copy missing one of the
+  // injected files — a half-finished delete, a stray `rm` — is not something to
+  // leave serving, so a sync that finds it that way rebuilds the whole thing
+  // rather than deciding "unchanged" and moving on.
+  if (!force && previous && previous.app === stamp.app && previous.fingerprint === stamp.fingerprint && rendererReady()) {
+    // The app is unchanged, but the files injected beside it may not be: a plugin
+    // update changes them while the app stays put, so they are copied in on their
+    // own rather than rebuilding the whole interface for them. The copy is known
+    // to be intact here, from the condition above.
+    if (previous.script !== stamp.script) {
       try {
-        copyFileSync(READOUT_SCRIPT, join(RENDERER_DIR, "vitals.js"))
+        for (const [name, source] of ASSETS) copyFileSync(source, join(RENDERER_DIR, name))
         writeFileSync(join(RENDERER_DIR, MARKER), JSON.stringify(stamp))
         return { ok: true, changed: true, ...stamp }
       } catch (error) {
-        return { ok: false, reason: `could not update ${join(RENDERER_DIR, "vitals.js")}: ${String(error)}` }
+        return { ok: false, reason: `could not update ${RENDERER_DIR}: ${String(error)}` }
       }
     }
     return { ok: true, changed: false, ...stamp }
@@ -354,7 +382,7 @@ export function syncRenderer({ force = false } = {}) {
       rmSync(staging, { recursive: true, force: true })
       return { ok: false, reason: "the app's index.html no longer loads a module bundle this can sit beside" }
     }
-    copyFileSync(READOUT_SCRIPT, join(staging, "vitals.js"))
+    for (const [name, source] of ASSETS) copyFileSync(source, join(staging, name))
     writeFileSync(join(staging, MARKER), JSON.stringify(stamp))
 
     if (existsSync(RENDERER_DIR)) {
@@ -403,7 +431,7 @@ export function inspect() {
   const app = createHash("sha256").update(path).digest("hex").slice(0, 8)
   let stamp
   try {
-    stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
+    stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: assetsHash() }
   } catch (error) {
     return { ok: false, reason: `could not read ${path}: ${String(error)}` }
   }
@@ -428,8 +456,10 @@ export function inspect() {
 
 export function rendererReady() {
   try {
-    return existsSync(join(RENDERER_DIR, "index.html")) && existsSync(join(RENDERER_DIR, "vitals.js"))
-  } catch {    return false
+    if (!existsSync(join(RENDERER_DIR, "index.html"))) return false
+    return ASSETS.every(([name]) => existsSync(join(RENDERER_DIR, name)))
+  } catch {
+    return false
   }
 }
 
@@ -765,6 +795,9 @@ export const readoutInternals = {
   RENDERER_DIR,
   PORT,
   SCRIPT_TAG,
+  ARABIC_TAG,
+  INJECT_TAG,
+  ASSETS,
   HOST_SCRIPT,
   cacheControlFor,
   appCandidates,

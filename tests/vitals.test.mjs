@@ -721,6 +721,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("a command carries the package name", manifest.bin?.["opencode-vitals"] === "cli.mjs", JSON.stringify(manifest.bin))
   check("the dispatcher ships with the package", manifest.files.includes("cli.mjs"), JSON.stringify(manifest.files))
   check("the readout ships with the package", manifest.files.includes("readout.mjs") && manifest.files.includes("renderer/vitals.js"), JSON.stringify(manifest.files))
+  check("the Arabic fix ships with the package", manifest.files.includes("renderer/arabic.css") && manifest.files.includes("renderer/arabic.js"), JSON.stringify(manifest.files))
   check("nothing that drew a window is still shipped", !shippedFiles(manifest).some((name) => name.endsWith(".py") || name === "start-bar.sh"), JSON.stringify(shippedFiles(manifest)))
   check("shipped file list has no duplicates", new Set(shippedFiles(manifest)).size === shippedFiles(manifest).length)
 
@@ -732,6 +733,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("installed manifest matches the package", JSON.parse(readFileSync(join(plugins, "opencode-vitals", "package.json"), "utf8")).version === manifest.version)
   check("the readout ships next to the plugin", existsSync(join(plugins, "opencode-vitals", "readout.mjs")))
   check("the readout's injected script is shipped", existsSync(join(plugins, "opencode-vitals", "renderer", "vitals.js")))
+  check("the Arabic files are shipped next to the plugin", existsSync(join(plugins, "opencode-vitals", "renderer", "arabic.css")) && existsSync(join(plugins, "opencode-vitals", "renderer", "arabic.js")))
   check("nested directories are created", existsSync(join(plugins, "opencode-vitals", "docs", "readout.png")))
 
   const again = install({ pluginsDir: plugins, packageRoot: new URL("..", import.meta.url).pathname, name: "opencode-vitals" })
@@ -1350,6 +1352,13 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   // module script itself, so a new name is not a reason the readout cannot load.
   check("injection: a differently named bundle is still found", injectTag(Buffer.from('<script type="module" src="./assets/index-xyz789.js"></script>')).includes(SCRIPT_TAG))
   check("injection: an absolute bundle path is still found", injectTag(Buffer.from('<script type="module" src="/assets/chunk-abc.js"></script>')).includes(SCRIPT_TAG))
+  // The Arabic fixes are injected the same way, beside the same bundle.
+  check("injection: the Arabic stylesheet is injected too", injectTag(page).includes('href="./arabic.css"'))
+  check("injection: the Arabic script is injected too", injectTag(page).includes('src="./arabic.js"'))
+  check("injection: the Arabic files are not injected twice", (() => {
+    const once = injectTag(page)
+    return (once.match(/arabic\.css/g) ?? []).length === 1 && (once.match(/arabic\.js/g) ?? []).length === 1
+  })())
 
   // -- the launcher entry -----------------------------------------------------
   // Ours is a copy of the system entry with Exec changed, so the packager's icon,
@@ -1912,7 +1921,7 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   process.env.OPENCODE_VITALS_DIR = work
   process.env.OPENCODE_DESKTOP_APP = join(home, "App", "resources", "app.asar")
   mkdirSync(join(home, "App", "resources"), { recursive: true })
-  const { syncRenderer } = await import(`../readout.mjs?update=${Date.now()}`)
+  const { syncRenderer, rendererReady } = await import(`../readout.mjs?update=${Date.now()}`)
 
   // A stand-in for a released app: a bundle, a page that loads it, and a version
   // of the page. Rewriting the page is what an app update does to it.
@@ -1948,6 +1957,13 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("the first sync copies the app's renderer", first.ok === true && first.changed === true, JSON.stringify(first))
   check("and the copy is the app's own page with the readout added", /build" content="1"/.test(copied() ?? "") && /vitals\.js/.test(copied() ?? ""), JSON.stringify(copied()))
   check("the readout script is copied in beside it", existsSync(join(work, "renderer", "vitals.js")))
+  check("the Arabic fix is copied in beside it", existsSync(join(work, "renderer", "arabic.css")) && existsSync(join(work, "renderer", "arabic.js")))
+  // The copy is only ready when all three files are there; a copy with the readout
+  // but not the Arabic fix must be rebuilt rather than served.
+  rmSync(join(work, "renderer", "arabic.css"), { force: true })
+  check("a copy missing the Arabic fix is not ready", rendererReady() === false)
+  const repaired = syncRenderer()
+  check("and the sync puts the Arabic fix back", repaired.ok === true && rendererReady() === true && existsSync(join(work, "renderer", "arabic.css")), JSON.stringify(repaired))
 
   // This is the check that matters for cost, not just correctness: the timer runs
   // every ten minutes for the life of the machine, and a renderer is tens of

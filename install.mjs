@@ -106,13 +106,15 @@ try {
 } catch {
   // Keep the defaults: nothing to set up is a valid answer.
 }
-// The readout is drawn by OpenCode's own window, so nothing in the package needs
-// to be executable any more: the entry points are Node, and npm already shims
-// those on every platform.
-const EXECUTABLE_SUFFIXES = []
+// The fallback list, used only for a manifest with no `files` of its own. It has
+// to be the whole package: an earlier copy of it was missing `host.mjs` and
+// `update.mjs`, so an install from such a manifest produced a plugin whose
+// launcher host and updater were absent.
 const FALLBACK_FILES = [
   "index.js",
   "readout.mjs",
+  "host.mjs",
+  "update.mjs",
   "renderer/vitals.js",
   "cli.mjs",
   "selftest.mjs",
@@ -403,8 +405,10 @@ function describeExisting(target) {
 function copyFile(source, destination) {
   mkdirSync(dirname(destination), { recursive: true })
   copyFileSync(source, destination)
-  const mode = EXECUTABLE_SUFFIXES.some((suffix) => destination.endsWith(suffix)) ? 0o755 : 0o644
-  chmodSync(destination, mode)
+  // Nothing in the package is executable any more: the readout is drawn by
+  // OpenCode's own window, the entry points are run by Node, and npm shims the
+  // bins on every platform.
+  chmodSync(destination, 0o644)
 }
 
 export function install({
@@ -553,7 +557,7 @@ export function uninstall({
   // window is a separate process: deleting its files does not stop it, so an
   // upgrade left the old bar on screen next to the readout. It is stopped here,
   // while we still know where it was and what it belonged to.
-  const legacy = stopLegacyBar()
+  const legacy = stopLegacyBar(statusDir ? { statusDir } : {})
   // The readout's copy of the app's renderer and its launcher entry, whether or
   // not there was a copy in the plugin directory. This used to sit behind an
   // early return for the "no copy" case — which is the normal case, because a
@@ -583,12 +587,14 @@ export function removeStatus({ statusDir = join(tmpdir(), "opencode-latency-moni
     "plugin-version.json",
     "update-check.json",
     "popup.lock",
+    "storage.lock",
   ]
   const removed = []
   try {
     for (const name of readdirSync(statusDir)) {
-      // Response markers are ours by pattern: a response id and a .marker suffix.
-      if (!ours.includes(name) && !name.endsWith(".marker")) continue
+      // Response markers are ours by pattern, as is a half-written atomic temp
+      // file a killed process left behind; a storage lock is ours by name.
+      if (!ours.includes(name) && !name.endsWith(".marker") && !name.endsWith(".tmp")) continue
       rmSync(join(statusDir, name), { force: true })
       removed.push(name)
     }
@@ -733,7 +739,8 @@ function main(argv) {
   }
 
   if (options.mode === "package") {
-    const registered = register()
+    const manifest = readManifest()
+    const registered = register({ expected: manifest.version })
     if (!registered.ok) {
       // Falling back rather than failing: a copy is worse — OpenCode cannot
       // update it — but it is what this package did until now, and a user who
@@ -746,12 +753,19 @@ function main(argv) {
     } else {
       // Both shapes at once means the plugin loads twice and measures every
       // event twice. This is the one cleanup that has to happen on the way in.
-      const stale = describeExisting(join(pluginsDir, targetName(readManifest())))
-      if (stale.installed && !options.force) {
-        process.stdout.write(`removing the copy at ${stale.target}, which the registered package replaces\n`)
-        uninstall({ pluginsDir, force: true })
+      // `describeExisting` reports a `kind`, not an `installed` flag, so that is
+      // what the check reads — the old field never existed and the cleanup never
+      // ran. The copy is removed directly rather than through `uninstall`,
+      // because that would also unregister the package just added and delete the
+      // readout and the measurements the package depends on.
+      const staleTarget = join(pluginsDir, targetName(manifest))
+      const stale = describeExisting(staleTarget)
+      const staleOurs = stale.kind === "link" ||
+        (stale.kind === "other-package" && stale.name === manifest.name)
+      if (stale.kind !== "absent" && staleOurs && !options.force) {
+        process.stdout.write(`removing the copy at ${staleTarget}, which the registered package replaces\n`)
+        rmSync(staleTarget, { recursive: true, force: true })
       }
-      const manifest = readManifest()
       const reported = [
         `registered ${manifest.name} with OpenCode${registered.cli ? ` (${registered.cli})` : ""}`,
         registered.version

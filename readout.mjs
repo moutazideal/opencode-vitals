@@ -47,7 +47,14 @@ const RENDERER_DIR = join(WORK_DIR, "renderer")
 // copy it loaded.
 const PREVIOUS_RENDERER_DIR = `${RENDERER_DIR}.old`
 const DESKTOP_DIR = join(DATA_HOME, "applications")
-export const PORT = Number(process.env.OPENCODE_VITALS_PORT ?? 8971)
+// A port is a whole number in a range, and the environment is not trusted to be
+// one: `Number("")` is 0 and `Number("abc")` is NaN, either of which would make
+// the launcher entry point the window at a port that cannot be listened on.
+function validPort(value) {
+  const port = Number(value)
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+}
+export const PORT = validPort(process.env.OPENCODE_VITALS_PORT) ?? 8971
 
 // The app's own renderer entry point, and the tag that pulls our script in. The
 // tag goes beside the app's bundle, never inside it: the bundle is a build
@@ -303,7 +310,12 @@ export function syncRenderer({ force = false } = {}) {
   }
 
   const app = createHash("sha256").update(path).digest("hex").slice(0, 8)
-  const stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
+  let stamp
+  try {
+    stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
+  } catch (error) {
+    return { ok: false, reason: `could not read ${path}: ${String(error)}` }
+  }
   const previous = readMarker()
   if (!force && previous && previous.app === stamp.app && previous.fingerprint === stamp.fingerprint) {
     // The app is unchanged, but the readout script may not be: a plugin update
@@ -389,7 +401,12 @@ export function inspect() {
     return { ok: false, reason: `${path} has no out/renderer/index.html` }
   }
   const app = createHash("sha256").update(path).digest("hex").slice(0, 8)
-  const stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
+  let stamp
+  try {
+    stamp = { app, fingerprint: fingerprint({ ...asar, path }), script: readoutScriptHash() }
+  } catch (error) {
+    return { ok: false, reason: `could not read ${path}: ${String(error)}` }
+  }
   // The one question a copy cannot answer without being made: is there a module
   // bundle for the readout to sit beside? Injecting into a buffer proves it and
   // costs nothing.
@@ -468,19 +485,27 @@ function readSystemEntry(app) {
 }
 
 // The binary, taken from the system entry's own Exec rather than guessed from the
-// asar path: the asar is always "app.asar" and says nothing about what runs.
+// asar path: the asar is always "app.asar" and says nothing about what runs. The
+// first token of an Exec line may be quoted when its path contains a space, so
+// the quotes come off here — splitting on whitespace alone left them on and the
+// path unreadable, which reported a launcher binary that was not found on a
+// machine that plainly had one.
 function appBinary(systemEntry, app) {
   if (!systemEntry) {
     const guess = app.replace(/\/resources\/app\.asar$/, "")
     return existsSync(guess) ? guess : null
   }
-  const exec = systemEntry.exec.trim().split(/\s+/)[0]
-  return exec || null
+  const match = systemEntry.exec.trim().match(/^"([^"]+)"|^(\S+)/)
+  const binary = match ? match[1] ?? match[2] : ""
+  return binary || null
 }
 
 function markedEntryBody(systemEntry, binary) {
+  // A path with a space has to be quoted in the command, exactly as the system
+  // entry that was copied did it, or the desktop shell runs the wrong command.
+  const command = /\s/.test(binary) ? `"${binary}"` : binary
   return systemEntry.body
-    .replace(/^Exec=.*$/m, `Exec=env ELECTRON_RUN_AS_NODE=1 ${binary} "${HOST_SCRIPT}" --launch %U`)
+    .replace(/^Exec=.*$/m, `Exec=env ELECTRON_RUN_AS_NODE=1 ${command} "${HOST_SCRIPT}" --launch %U`)
     .trimEnd()
     .concat("\nX-OpenCode-Vitals=readout\n")
 }
@@ -607,7 +632,17 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
   }
 
   const server = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://localhost")
+    // The request target is not ours to trust — a client can send anything on a
+    // line — and `new URL` throws on some of it (`//..%2f..`, `///`). Left
+    // uncaught that is an exception in the plugin host, so a malformed target is
+    // answered and the server stays up.
+    let url
+    try {
+      url = new URL(request.url ?? "/", "http://localhost")
+    } catch {
+      response.writeHead(400, { "Content-Type": "text/plain" }).end("bad request")
+      return
+    }
     const { pathname } = url
 
     // The injected script reports whether it found the composer. It is the only
@@ -691,7 +726,10 @@ export function serve({ getSession, onListen, onError, onStatus, port } = {}) {
       return
     }
     response.writeHead(200, { "Content-Type": TYPES[".html"], "Cache-Control": "no-store" })
-    createReadStream(shell).pipe(response)
+    // The same guard the assets get: the file can be gone between the check above
+    // and the open below, and an unhandled stream error is an exception in the
+    // plugin host — the one thing this server is not allowed to cause.
+    serveAsset(response, shell)
   })
 
   // Two listeners on one port is deliberate. The readout server lives in the
@@ -727,10 +765,8 @@ export const readoutInternals = {
   RENDERER_DIR,
   PORT,
   SCRIPT_TAG,
-  MARKER,
   HOST_SCRIPT,
   cacheControlFor,
-  systemEntryDirs,
   appCandidates,
   findApp,
   inspect,
@@ -739,4 +775,5 @@ export const readoutInternals = {
   readSystemEntry,
   appBinary,
   markedEntryBody,
+  validPort,
 }

@@ -3,7 +3,7 @@ import * as vm from "node:vm"
 import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync, readFileSync, readdirSync, existsSync, utimesSync, statSync, lstatSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { createServer } from "node:net"
+import { createServer, connect } from "node:net"
 import { dirname, join } from "node:path"
 
 // The plugin resolves its status directory from the temporary directory when the
@@ -2839,6 +2839,337 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 8_000 })
   const elapsed = Date.now() - started
   check("host: it keeps serving through the update gap after the window closes", result.status === 0 && elapsed >= 550, `${elapsed}ms status=${result.status}`)
+}
+
+// --- the audit fixes, each pinned -------------------------------------------
+//
+// Every case below is a bug found by reading the code rather than by a user
+// hitting it, so the shipped suite did not cover the shape. Grouped here so the
+// reason each one exists sits beside its test.
+
+// A Map evicts by key. Handing `delete` the value made every eviction a no-op
+// and the `while` around it spun forever at 51 sessions — a hang, not a leak.
+{
+  const { dropOldest, MAX_SESSION_TOTALS } = vitalsInternals
+  const map = new Map()
+  for (let index = 0; index < MAX_SESSION_TOTALS + 8; index += 1) map.set(`ses_evict${index}`, { index })
+  dropOldest(map, MAX_SESSION_TOTALS)
+  check("eviction drops by key, not by value", map.size === MAX_SESSION_TOTALS, JSON.stringify(map.size))
+  check("and it drops the oldest, keeping the newest", !map.has("ses_evict0") && map.has(`ses_evict${MAX_SESSION_TOTALS + 7}`), JSON.stringify([...map.keys()].slice(0, 2)))
+}
+
+// The published totals file is bounded, and what survives is the work that got
+// furthest — not the sessions that happened to be inserted first.
+{
+  const { prunePublishedSessions } = vitalsInternals
+  const sessions = Object.create(null)
+  for (let index = 0; index < 210; index += 1) sessions[`ses_pub${index}`] = { turns: index, revision: 0 }
+  const pruned = prunePublishedSessions(sessions, 200)
+  check("the published totals file is capped", Object.keys(pruned).length === 200, JSON.stringify(Object.keys(pruned).length))
+  check("and it keeps the sessions that got furthest", !Object.hasOwn(pruned, "ses_pub0") && Object.hasOwn(pruned, "ses_pub209"), JSON.stringify([Object.hasOwn(pruned, "ses_pub0"), Object.hasOwn(pruned, "ses_pub209")]))
+}
+
+// The same path in a child process: a regression to `values()` hangs, and a hang
+// inside the suite would wedge it, so the parent kills the child on a deadline.
+{
+  const script = `
+    process.env.TMPDIR = ${JSON.stringify(join(SUITE_TMP, "evict"))}
+    process.env.XDG_CONFIG_HOME = ${JSON.stringify(join(SUITE_TMP, "evict", "cfg"))}
+    process.env.XDG_DATA_HOME = ${JSON.stringify(join(SUITE_TMP, "evict", "data"))}
+    process.env.OPENCODE_VITALS_PORT = "18981"
+    process.env.OPENCODE_DESKTOP_APP = ${JSON.stringify(join(SUITE_TMP, "none.asar"))}
+    const { default: plugin } = await import(${JSON.stringify(new URL("../index.js", import.meta.url).href)})
+    let n = 0
+    const ev = (type, data, at) => ({ id: "e" + (++n), created: at, type, data })
+    const pending = []; let wake = null; let store = null
+    await plugin.setup({
+      options: { popup: false, log: false },
+      location: { directory: "/tmp/vitals-evict" },
+      storage: { async get(){ return store ? { data: structuredClone(store) } : undefined }, async set(_k, v){ store = structuredClone(v) } },
+      event: { subscribe(){ return (async function*(){ while (true) { while (pending.length) yield pending.shift(); await new Promise((r) => { wake = r }) } })() } },
+      session: { async hook(){}, async context(){ return [] } },
+    })
+    for (let i = 0; i < 58; i++) {
+      const S = "ses_eviction" + i, t = Date.now() - 200000 + i * 50
+      pending.push(ev("session.execution.started", { sessionID: S }, t))
+      pending.push(ev("session.text.delta", { sessionID: S, assistantMessageID: "m" + i, ordinal: 0, delta: "x" }, t + 10))
+      pending.push(ev("session.step.ended", { sessionID: S, assistantMessageID: "m" + i, tokens: { output: 1 } }, t + 20))
+      pending.push(ev("session.execution.succeeded", { sessionID: S }, t + 30))
+      wake?.()
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    console.log("REACHED-THE-END")
+  `
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000 })
+  check("58 sessions do not hang the plugin", child.status === 0 && /REACHED-THE-END/.test(child.stdout ?? ""), JSON.stringify({ status: child.status, signal: child.signal, error: child.error?.code }))
+}
+
+// An interrupted stream keeps the time it streamed before the gap. Resetting the
+// span's `first` without banking the earlier stretch threw that time away and
+// made a reconnect look fast.
+{
+  const sessionID = `ses_gapkeep${unique}`
+  const t = base
+  const { storage, cleanup } = await run([
+    envelope("session.execution.started", { sessionID }, t),
+    envelope("session.text.started", { sessionID, assistantMessageID: "msg_gk", ordinal: 0 }, t + 10),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_gk", ordinal: 0, delta: "aa" }, t + 100),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_gk", ordinal: 0, delta: "bb" }, t + 1100),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_gk", ordinal: 0, delta: "cc" }, t + 2100),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_gk", ordinal: 0, delta: "dd" }, t + 36_100),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_gk", ordinal: 0, delta: "ee" }, t + 37_100),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_gk", ordinal: 0, delta: "ff" }, t + 38_100),
+    envelope("session.step.ended", { sessionID, assistantMessageID: "msg_gk", tokens: { output: 1000 } }, t + 38_200),
+    envelope("session.execution.succeeded", { sessionID }, t + 38_300),
+  ])
+  const record = await waitForRecord(storage, (item) => item.sessionID === sessionID)
+  check("a gap is dropped without dropping the streaming before it", record.activeStreamMs === 4000, JSON.stringify(record.activeStreamMs))
+  check("and the rate counts both stretches", Math.abs((record.tokensPerSecond ?? 0) - 250) < 0.01, JSON.stringify(record.tokensPerSecond))
+  cleanup()
+}
+
+// A parent's rate is its own speed, even after a subagent credited it tokens. The
+// tokens are in its totals; the subagent's time is not, so it must not reach the
+// denominator.
+{
+  const parent = `ses_rateparent${unique.slice(0, 12)}`
+  const child = `ses_ratechild${unique.slice(0, 12)}`
+  const t = base
+  const { storage, cleanup } = await run([
+    envelope("session.execution.started", { sessionID: parent }, t),
+    envelope("session.step.started", { sessionID: parent, assistantMessageID: "mp", started: t + 10 }, t + 10),
+    envelope("session.text.delta", { sessionID: parent, assistantMessageID: "mp", ordinal: 0, delta: "looking" }, t + 100),
+    envelope("session.execution.started", { sessionID: child }, t + 200),
+    envelope("session.text.delta", { sessionID: child, assistantMessageID: "mc", ordinal: 0, delta: "work" }, t + 300),
+    envelope("session.text.delta", { sessionID: child, assistantMessageID: "mc", ordinal: 0, delta: "ing" }, t + 1500),
+    envelope("session.step.ended", { sessionID: child, assistantMessageID: "mc", tokens: { output: 1200 } }, t + 1600),
+    envelope("session.execution.succeeded", { sessionID: child }, t + 1700),
+    envelope("session.text.delta", { sessionID: parent, assistantMessageID: "mp", ordinal: 0, delta: "done" }, t + 3000),
+    envelope("session.step.ended", { sessionID: parent, assistantMessageID: "mp", tokens: { output: 400 } }, t + 3100),
+    envelope("session.execution.succeeded", { sessionID: parent }, t + 3200),
+  ], { sessions: { [child]: { id: child, parentID: parent } } })
+  const record = await waitForRecord(storage, (item) => item.sessionID === parent)
+  check("a subagent's tokens do not inflate the parent's rate", Math.abs((record.sessionTotals?.tokensPerSecond ?? 0) - 400 / 2.9) < 0.1, JSON.stringify(record.sessionTotals?.tokensPerSecond))
+  // The rate's inputs are the parent's own: 400 tokens over its own 2.9s. The
+  // delegated 1200 tokens are in the totals but never in this pair, no matter
+  // when the subagent's finish lands relative to the parent's.
+  check("the parent's rate is built from its own tokens and time", record.sessionTotals?.ownGeneratedTokens === 400 && record.sessionTotals?.ownActiveStreamMs === 2900, JSON.stringify([record.sessionTotals?.ownGeneratedTokens, record.sessionTotals?.ownActiveStreamMs]))
+  cleanup()
+}
+
+// Two subagent credits to a parent with no turn of its own both reach the
+// published file. Ranking by `turns` alone saw the two identical and kept the
+// older one, so the second credit was silently discarded.
+{
+  const parent = `ses_creditparent${unique.slice(0, 10)}`
+  const childA = `ses_creditchildA${unique.slice(0, 9)}`
+  const childB = `ses_creditchildB${unique.slice(0, 9)}`
+  const t = base
+  const totalsPath = vitalsInternals.SESSION_TOTALS_FILE
+  const previous = existsSync(totalsPath) ? readFileSync(totalsPath, "utf8") : null
+  const turn = (child, offset) => [
+    envelope("session.execution.started", { sessionID: child }, t + offset),
+    envelope("session.text.delta", { sessionID: child, assistantMessageID: `m${child}`, ordinal: 0, delta: "w" }, t + offset + 50),
+    envelope("session.text.delta", { sessionID: child, assistantMessageID: `m${child}`, ordinal: 0, delta: "k" }, t + offset + 700),
+    envelope("session.step.ended", { sessionID: child, assistantMessageID: `m${child}`, tokens: { output: 1000 } }, t + offset + 800),
+    envelope("session.execution.succeeded", { sessionID: child }, t + offset + 900),
+  ]
+  const first = await run(turn(childA, 0), { sessions: { [childA]: { id: childA, parentID: parent } }, pluginOptions: { popup: true } })
+  await waitForRecord(first.storage, (item) => item.sessionID === childA)
+  await wait(250)
+  const second = await run(turn(childB, 10_000), { sessions: { [childB]: { id: childB, parentID: parent } }, pluginOptions: { popup: true } })
+  await waitForRecord(second.storage, (item) => item.sessionID === childB)
+  await wait(250)
+  const published = JSON.parse(readFileSync(totalsPath, "utf8")).sessions[parent]
+  check("a second credit is not lost to the snapshot rank", published?.generatedTokens === 2000 && published?.subagentTurns === 2, JSON.stringify(published && { tokens: published.generatedTokens, subagentTurns: published.subagentTurns }))
+  first.cleanup()
+  second.cleanup()
+  if (previous !== null) writeFileSync(totalsPath, previous)
+  else rmSync(totalsPath, { force: true })
+}
+
+// Ordinary session lifecycle events are known and ignored, not counted as
+// unknown measurements with a warning attached.
+{
+  const sessionID = `ses_lifecycle${unique}`
+  const { storage, cleanup } = await run([
+    envelope("session.created", { sessionID }, base),
+    envelope("session.status", { sessionID, status: "working" }, base + 1),
+    envelope("session.status", { sessionID, status: "idle" }, base + 2),
+    envelope("session.renamed", { sessionID, title: "x" }, base + 3),
+    envelope("session.moved", { sessionID }, base + 4),
+    envelope("session.execution.started", { sessionID }, base + 10),
+    envelope("session.text.delta", { sessionID, assistantMessageID: "msg_life", ordinal: 0, delta: "x" }, base + 100),
+    envelope("session.step.ended", { sessionID, assistantMessageID: "msg_life", tokens: { output: 2 } }, base + 150),
+    envelope("session.execution.succeeded", { sessionID }, base + 200),
+  ])
+  const record = await waitForRecord(storage, (item) => item.sessionID === sessionID)
+  check("session lifecycle events are known, not reported as unknown", record.unknownEventTypes === "", JSON.stringify(record.unknownEventTypes))
+  cleanup()
+}
+
+// A reload of one location replaces its instance instead of leaking the old one:
+// the old cleanup is never called when OpenCode runs setup again, so the marker
+// timer and the readout pool entry used to accumulate.
+{
+  const location = `/tmp/opencode/vitals-reload-${Math.random()}`
+  const a = await run([], { pluginOptions: { popup: true }, location: { directory: location } })
+  const b = await run([], { pluginOptions: { popup: true }, location: { directory: location } })
+  const alive = async () => {
+    try { return (await fetch(`http://127.0.0.1:${READOUT_PORT}/__vitals-health`)).status } catch { return null }
+  }
+  const whileBoth = await alive()
+  b.cleanup()
+  await wait(200)
+  const afterReload = await alive()
+  a.cleanup()
+  check("a reload of one location does not leak its instance", whileBoth === 204 && afterReload === null, JSON.stringify({ whileBoth, afterReload }))
+}
+
+// A malformed request target used to throw out of the request handler and take
+// the whole server process with it.
+{
+  const { serve } = await import("../readout.mjs")
+  // An ephemeral port: the fixed offsets the other server cases use are fine,
+  // but a test that only wants "a server" should not have to know which one is free.
+  const server = serve({ getSession: () => ({ sessionID: null, totals: null }), port: 0 })
+  for (let attempt = 0; attempt < 40 && !server.listening; attempt += 1) await wait(25)
+  const port = server.address()?.port
+  const status = await new Promise((resolve) => {
+    if (!port) { resolve("no port"); return }
+    const socket = connect(port, "127.0.0.1", () => socket.write("GET //..%2f..%2fetc%2fpasswd HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+    let text = ""
+    socket.on("data", (chunk) => { text += chunk })
+    socket.on("close", () => resolve(text.split("\r\n")[0]))
+    socket.on("error", (error) => resolve(`ERR ${error.code}`))
+    setTimeout(() => { socket.destroy(); resolve("timeout") }, 2000)
+  })
+  check("a malformed request target is answered 400, not fatal", status === "HTTP/1.1 400 Bad Request", JSON.stringify(status))
+  const health = port ? await fetch(`http://127.0.0.1:${port}/__vitals-health`) : { status: 0 }
+  check("and the server is still listening after it", health.status === 204, String(health.status))
+  await new Promise((resolve) => server.close(resolve))
+}
+
+// The shell is served through the same guarded stream the assets use, so a shell
+// that vanishes between the check and the open is a 503 rather than a crash.
+{
+  const home = mkdtempSync(join(tmpdir(), "vitals-shell-"))
+  const work = join(home, "work")
+  const renderer = join(work, "renderer")
+  mkdirSync(renderer, { recursive: true })
+  writeFileSync(join(renderer, "index.html"), "<!doctype html><html></html>")
+  const previousDir = process.env.OPENCODE_VITALS_DIR
+  process.env.OPENCODE_VITALS_DIR = work
+  const { serve: serveShell } = await import(`../readout.mjs?shell=${Date.now()}`)
+  const server = serveShell({ getSession: () => ({ sessionID: null, totals: null }), port: 0 })
+  for (let attempt = 0; attempt < 40 && !server.listening; attempt += 1) await wait(25)
+  const port = server.address()?.port
+  const status = async (path) => {
+    if (!port) return null
+    try { return (await fetch(`http://127.0.0.1:${port}${path}`)).status } catch { return null }
+  }
+  const served = await status("/")
+  rmSync(join(renderer, "index.html"), { force: true })
+  const gone = await status("/")
+  const alive = await status("/__vitals-health")
+  check("the shell is served through the guarded asset path", served === 200, String(served))
+  check("a shell that vanishes is a 503, and the server survives", gone === 503 && alive === 204, JSON.stringify({ gone, alive }))
+  await new Promise((resolve) => server.close(resolve))
+  if (previousDir === undefined) delete process.env.OPENCODE_VITALS_DIR
+  else process.env.OPENCODE_VITALS_DIR = previousDir
+  rmSync(home, { recursive: true, force: true })
+}
+
+// A quoted Exec yields its binary, and a binary with a space is quoted in the
+// entry this plugin writes.
+{
+  const { readoutInternals } = await import("../readout.mjs")
+  const { appBinary, markedEntryBody } = readoutInternals
+  const quoted = { name: "ai.opencode.desktop.desktop", exec: '"/opt/My Apps/ai.opencode.desktop" %U', body: '[Desktop Entry]\nName=OpenCode\nExec="/opt/My Apps/ai.opencode.desktop" %U\n' }
+  check("a quoted Exec yields the binary, not the quote", appBinary(quoted, "/opt/My Apps/resources/app.asar") === "/opt/My Apps/ai.opencode.desktop", JSON.stringify(appBinary(quoted, "/x")))
+  const body = markedEntryBody(quoted, "/opt/My Apps/ai.opencode.desktop")
+  check("a binary with a space is quoted in the entry we write", body.includes('ELECTRON_RUN_AS_NODE=1 "/opt/My Apps/ai.opencode.desktop"'), body.split("\n")[2])
+}
+
+// The port from the environment is validated: an empty or junk value would point
+// the launcher entry at a port nothing can listen on.
+{
+  const { readoutInternals } = await import("../readout.mjs")
+  const { validPort } = readoutInternals
+  check("a valid port is kept", validPort("8971") === 8971 && validPort(8971) === 8971)
+  check("an empty or junk port is refused", validPort("") === null && validPort("abc") === null, JSON.stringify([validPort(""), validPort("abc")]))
+  check("out-of-range ports are refused", validPort("0") === null && validPort("70000") === null && validPort("-1") === null)
+}
+
+// The launcher forwards the application's own exit code instead of reporting
+// every crash as a clean exit.
+{
+  if (process.platform !== "win32") {
+    const hostUrl = new URL("../host.mjs", import.meta.url).href
+    const script = `import(${JSON.stringify(hostUrl)}).then((m) => m.launch([], { app: "/bin/false", start: async () => null, health: async () => false }))`
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 8000 })
+    check("the launcher forwards the app's exit code", result.status === 1, JSON.stringify({ status: result.status, signal: result.signal }))
+  }
+}
+
+// register() is told which version is being installed. Without it the comparison
+// is skipped and a matching version is reported as outdated.
+{
+  const home = mkdtempSync(join(tmpdir(), "vitals-register-"))
+  const bin = join(home, "bin")
+  mkdirSync(bin, { recursive: true })
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+  const fake = join(bin, "opencode")
+  writeFileSync(fake, `#!/bin/sh\ncase "$2" in add) echo added;; update) echo updated;; list) echo "ID VERSION SOURCE"; echo "opencode-vitals ${manifest.version} opencode-vitals";; esac\nexit 0\n`, { mode: 0o755 })
+  const out = spawnSync(process.execPath, [new URL("../install.mjs", import.meta.url).pathname], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local", "share"), OPENCODE_CLI: fake },
+  })
+  const versionLine = (out.stdout ?? "").split("\n").find((line) => line.includes("OpenCode has")) ?? ""
+  check("a matching version is not reported as outdated", versionLine.includes(manifest.version) && !versionLine.includes("not "), JSON.stringify(versionLine))
+  check("and no needless retry advice is printed", !/it will try again on its next start/.test(out.stdout ?? ""), JSON.stringify((out.stdout ?? "").split("\n").slice(0, 4)))
+  rmSync(home, { recursive: true, force: true })
+}
+
+// Registering the package removes a stale copy of the same package — both shapes
+// at once load the plugin twice — but never a stranger's directory.
+{
+  const home = mkdtempSync(join(tmpdir(), "vitals-stale-"))
+  const bin = join(home, "bin")
+  mkdirSync(bin, { recursive: true })
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+  const fake = join(bin, "opencode")
+  writeFileSync(fake, `#!/bin/sh\ncase "$2" in add) echo added;; update) echo updated;; list) echo "ID VERSION SOURCE"; echo "opencode-vitals ${manifest.version} opencode-vitals";; esac\nexit 0\n`, { mode: 0o755 })
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local", "share"), OPENCODE_CLI: fake }
+  const cli = new URL("../install.mjs", import.meta.url).pathname
+  const plugins = join(home, ".config", "opencode", "plugins")
+  const copy = join(plugins, "opencode-vitals")
+  mkdirSync(copy, { recursive: true })
+  writeFileSync(join(copy, "package.json"), JSON.stringify({ name: "opencode-vitals", version: "0.0.1" }))
+  writeFileSync(join(copy, "index.js"), "// a stale copy\n")
+  const out = spawnSync(process.execPath, [cli], { encoding: "utf8", env })
+  check("registering removes a stale copy of the same package", !existsSync(join(copy, "index.js")) && /removing the copy/.test(out.stdout ?? ""), JSON.stringify({ removed: !existsSync(join(copy, "index.js")), said: /removing the copy/.test(out.stdout ?? "") }))
+  // A directory under our name that holds somebody else's package is not ours.
+  mkdirSync(copy, { recursive: true })
+  writeFileSync(join(copy, "package.json"), JSON.stringify({ name: "someone-else", version: "9.9.9" }))
+  const out2 = spawnSync(process.execPath, [cli], { encoding: "utf8", env })
+  check("but a foreign package is left alone", existsSync(join(copy, "package.json")) && !/removing the copy/.test(out2.stdout ?? ""), JSON.stringify({ survived: existsSync(join(copy, "package.json")) }))
+  rmSync(home, { recursive: true, force: true })
+}
+
+// Uninstall also takes a stale storage lock and a half-written atomic temp file,
+// while leaving files it does not own.
+{
+  const { removeStatus } = await import("../install.mjs")
+  const dir = mkdtempSync(join(tmpdir(), "vitals-status2-"))
+  writeFileSync(join(dir, "storage.lock"), "{}")
+  writeFileSync(join(dir, "session-totals.json.123.abcd.tmp"), "{}")
+  writeFileSync(join(dir, "notes.txt"), "keep me")
+  const report = removeStatus({ statusDir: dir })
+  const left = readdirSync(dir).sort()
+  check("uninstall removes a stale lock and temp files", !left.includes("storage.lock") && !left.includes("session-totals.json.123.abcd.tmp"), JSON.stringify(left))
+  check("and still leaves files it does not own", left.includes("notes.txt") && report.ok === true, JSON.stringify(left))
+  rmSync(dir, { recursive: true, force: true })
 }
 
 // The check count printed in the page is a claim like any other, so it is

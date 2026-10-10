@@ -310,7 +310,7 @@ records, if you want to compute something else.
 | --- | --- |
 | **Platform** | **Linux** |
 | **App** | **OpenCode V2 Desktop** — the terminal client is not enough |
-| OpenCode version | V2 (developed against 2.0.14, 2.0.16, 2.0.18 and 2.0.19) |
+| OpenCode version | V2 (developed against 2.0.14, 2.0.16, 2.0.18, 2.0.19 and 2.0.26) |
 | Node | 18 or newer, for the plugin |
 | Python | **not needed any more** |
 | Packages to install | **none** |
@@ -397,7 +397,7 @@ on a machine that was only being asked a question.
 | --- | --- | --- |
 | `popup` | `true` | Show the readout. `false` keeps measuring and serves nothing to the app. |
 | `historyLimit` | `20` | Measurements kept in storage, 1–100. |
-| `log` | `false` | Log one line per measurement through OpenCode's logger. Errors and version changes are printed either way. |
+| `log` | `false` | Log one line per measurement. Errors and version changes are printed either way. |
 | `enabled` | `true` | Master switch. |
 
 ```json
@@ -410,6 +410,10 @@ on a machine that was only being asked a question.
   ]
 }
 ```
+
+These lines go to OpenCode's logger when the host offers one and to the service's console
+otherwise; OpenCode V2's `App` API exposes no logger, so on the desktop app they appear in the
+service log.
 
 Environment variables, for the curious:
 
@@ -566,7 +570,7 @@ To install a copy of the checkout instead, drop the `--link`. To put it somewher
 ### Development
 
 ```bash
-npm test                 # 454 checks
+npm test                 # 482 checks
 npm run test:compat      # the compatibility check's own logic
 npm run compat           # this plugin against the pinned OpenCode API
 node selftest.mjs        # can this machine show the readout?

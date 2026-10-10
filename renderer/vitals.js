@@ -69,6 +69,8 @@ const parts = {}
 // at all. See GIVE_UP_AFTER.
 let misses = 0
 let wanted = false
+// Whether a poll is in flight. See tick().
+let busy = false
 
 const build = () => {
   root = document.createElement("div")
@@ -169,46 +171,55 @@ const report = (placed, detail) => {
 }
 
 const tick = async () => {
-  const sessionID = currentSession()
-  let payload = null
+  // `setInterval` does not await an async callback, so a slow poll — one waiting
+  // out its own 2.5s deadline — would otherwise overlap the next tick and stack
+  // requests. Skipping while one is in flight keeps exactly one at a time.
+  if (busy) return
+  busy = true
   try {
-    // Fetch first and place second. Tying the two together meant a composer that
-    // was not on screen also silenced the data, which left nothing to diagnose.
-    // A server that accepts the connection and never answers must not stall the
-    // readout forever: without a deadline the poll hangs, `misses` never grows,
-    // and a dead row can never be withdrawn. A timeout is a failed poll.
-    const query = sessionID ? `?session=${encodeURIComponent(sessionID)}` : ""
-    const response = await fetch(`/vitals${query}`, { cache: "no-store", signal: AbortSignal.timeout(2500) })
-    if (response.ok) payload = await response.json()
-  } catch {
-    // The server going away must not take the editor with it.
-  }
+    const sessionID = currentSession()
+    let payload = null
+    try {
+      // Fetch first and place second. Tying the two together meant a composer that
+      // was not on screen also silenced the data, which left nothing to diagnose.
+      // A server that accepts the connection and never answers must not stall the
+      // readout forever: without a deadline the poll hangs, `misses` never grows,
+      // and a dead row can never be withdrawn. A timeout is a failed poll.
+      const query = sessionID ? `?session=${encodeURIComponent(sessionID)}` : ""
+      const response = await fetch(`/vitals${query}`, { cache: "no-store", signal: AbortSignal.timeout(2500) })
+      if (response.ok) payload = await response.json()
+    } catch {
+      // The server going away must not take the editor with it.
+    }
 
-  // A server that answers and a session with no numbers are different things.
-  // Only the first failure means there is no longer anything here to read: an
-  // empty answer is a session that has not been measured yet, and it stays a
-  // dash because a dash is honest where a neighbour's numbers would not be.
-  if (payload) {
-    misses = 0
-    wanted = true
-  } else if (++misses >= GIVE_UP_AFTER) {
-    // The server is not coming back — this is what uninstalling looks like from
-    // in here. A row that outlives its data is worse than no row, because it
-    // looks like a reading.
-    wanted = false
-    root?.remove()
-    return
-  }
+    // A server that answers and a session with no numbers are different things.
+    // Only the first failure means there is no longer anything here to read: an
+    // empty answer is a session that has not been measured yet, and it stays a
+    // dash because a dash is honest where a neighbour's numbers would not be.
+    if (payload) {
+      misses = 0
+      wanted = true
+    } else if (++misses >= GIVE_UP_AFTER) {
+      // The server is not coming back — this is what uninstalling looks like from
+      // in here. A row that outlives its data is worse than no row, because it
+      // looks like a reading.
+      wanted = false
+      root?.remove()
+      return
+    }
 
-  // Asked on every tick, and separately from placing: "the app renamed the slot"
-  // is the failure that leaves no other trace anywhere, so the server has to hear
-  // it. A blank row is not a report, though — nothing is placed until there is
-  // something to put in it.
-  const placed = Boolean(place())
-  const slots = document.querySelectorAll("[data-slot]").length
-  const where = placed ? "composer-actions" : `composer-actions absent; slots=${slots}`
-  report(placed, `${where}; session=${sessionID ?? "none"}${payload ? "" : "; no data yet"}`)
-  if (payload && placed) paint(payload)
+    // Asked on every tick, and separately from placing: "the app renamed the slot"
+    // is the failure that leaves no other trace anywhere, so the server has to hear
+    // it. A blank row is not a report, though — nothing is placed until there is
+    // something to put in it.
+    const placed = Boolean(place())
+    const slots = document.querySelectorAll("[data-slot]").length
+    const where = placed ? "composer-actions" : `composer-actions absent; slots=${slots}`
+    report(placed, `${where}; session=${sessionID ?? "none"}${payload ? "" : "; no data yet"}`)
+    if (payload && placed) paint(payload)
+  } finally {
+    busy = false
+  }
 }
 
 // The app re-renders the composer as sessions change, which removes our node.

@@ -166,7 +166,7 @@ async function findUpdaterBinary() {
 
 // Hand the swap to OpenCode. Its own updater, its own view of what is installed,
 // its own idea of where packages live — ours is only the argument.
-export function applyUpdate({ cli, name = PLUGIN_NAME, timeoutMs = APPLY_TIMEOUT_MS, spawn: run = spawn } = {}) {
+function applyUpdate({ cli, name = PLUGIN_NAME, timeoutMs = APPLY_TIMEOUT_MS, spawn: run = spawn } = {}) {
   return new Promise((resolve) => {
     void (async () => {
       const binary = cli ?? (await findUpdaterBinary())
@@ -275,11 +275,5 @@ export async function updateIfNeeded({ statusDir = join(tmpdir(), "opencode-late
   return outcome
 }
 
-export const updateInternals = {
-  APPLY_TIMEOUT_MS,
-  DEFAULT_REGISTRY,
-  PLUGIN_NAME,
-  readLatch,
-  writeLatch,
-  truthy,
-}
+// (There is no `updateInternals` export: nothing outside this module read it, and
+// an export nobody reads is a second copy of the truth that goes stale silently.)

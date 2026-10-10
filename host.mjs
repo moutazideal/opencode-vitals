@@ -59,7 +59,7 @@ export function readTotals(sessionID) {
 // window is not the only server that may be there — the plugin's own is usually
 // up on a warm start, and the window must be pointed at it whether or not this
 // process managed to bind.
-export async function healthy({ port = PORT, timeoutMs = 500, fetch: request = fetch } = {}) {
+async function healthy({ port = PORT, timeoutMs = 500, fetch: request = fetch } = {}) {
   try {
     const response = await request(`http://127.0.0.1:${port}/__vitals-health`, { signal: AbortSignal.timeout(timeoutMs) })
     return Boolean(response?.ok)
@@ -71,7 +71,7 @@ export async function healthy({ port = PORT, timeoutMs = 500, fetch: request = f
 // Start the readout server, resolving to it once it listens or to null if it
 // cannot. `reusePort` is the point: the plugin's server binds the same port and
 // the two share it.
-export async function startServer({ port = PORT } = {}) {
+async function startServer({ port = PORT } = {}) {
   if (!rendererReady()) return null
   return await new Promise((resolve) => {
     let settled = false
@@ -98,7 +98,7 @@ export async function startServer({ port = PORT } = {}) {
 // while the restarted service has not bound one yet: closing here would be the
 // refused connection this host exists to prevent. So it keeps serving through a
 // grace period and leaves only if nothing comes back.
-export const LAUNCH_GRACE_MS = 45_000
+const LAUNCH_GRACE_MS = 45_000
 
 export async function launch(args, { app = process.execPath, spawn: run = spawn, start = startServer, health = healthy, graceMs = LAUNCH_GRACE_MS } = {}) {
   let server = null
@@ -132,7 +132,9 @@ export async function launch(args, { app = process.execPath, spawn: run = spawn,
     if (server) setTimeout(leave, graceMs)
     else leave()
   }
-  child.on("exit", () => finish(0))
+  // The application's own exit code is the launcher's answer: swallowing it made
+  // every crash look like a clean exit to whatever started the launcher.
+  child.on("exit", (code) => finish(typeof code === "number" ? code : 0))
   child.on("error", () => finish(1))
   return child
 }

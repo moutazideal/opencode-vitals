@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { installDesktopEntry, removeDesktopEntry, rendererReady, serve, syncRenderer } from "./readout.mjs"
+import { installDesktopEntry, removeDesktopEntry, serve, syncRenderer } from "./readout.mjs"
 import { START_DELAY_MS, updateIfNeeded } from "./update.mjs"
 
 const PLUGIN_ID = "opencode-vitals"
@@ -20,6 +20,12 @@ const PLUGIN_ID = "opencode-vitals"
 const STORAGE_KEY = "history-v2"
 const DEFAULT_HISTORY_LIMIT = 20
 const MAX_HISTORY_LIMIT = 100
+// How many sessions one process keeps in memory, and how many it lets the totals
+// file carry. The in-memory cap is the working set the readout can answer for;
+// the on-disk cap is only there so a machine that has opened thousands of
+// sessions over months does not accumulate one entry each forever.
+const MAX_SESSION_TOTALS = 50
+const MAX_PUBLISHED_SESSIONS = 200
 const STATUS_DIR = join(tmpdir(), "opencode-latency-monitor")
 const SESSION_TOTALS_FILE = join(STATUS_DIR, "session-totals.json")
 const RESPONSE_MARKER_TTL_MS = 10 * 60 * 1000
@@ -431,12 +437,16 @@ function eventTimestamp(event) {
 // whole snapshots is what keeps a reader from dividing a token count taken at
 // one moment by a stream time taken at another and calling the result a
 // measurement. `turns` only ever grows inside a session, so it is the primary
-// key, with the timestamp as the tie-break.
+// key. A revision counter comes next, for a session whose turn count does not
+// move — a parent credited with delegated subagent work never takes a turn of
+// its own, so two credits look identical to `turns` alone and the older snapshot
+// won. The timestamp is the last resort, for snapshots written before revisions.
 function snapshotRank(values) {
   if (!isRecord(values)) return null
   const turns = numberOrNull(values.turns)
+  const revision = numberOrNull(values.revision)
   const updatedAt = typeof values.updatedAt === "string" ? Date.parse(values.updatedAt) : numberOrNull(values.updatedAt)
-  return [turns ?? -1, Number.isFinite(updatedAt) ? updatedAt : 0]
+  return [turns ?? -1, revision ?? 0, Number.isFinite(updatedAt) ? updatedAt : 0]
 }
 
 function newerSnapshot(current, candidate) {
@@ -446,8 +456,44 @@ function newerSnapshot(current, candidate) {
   const right = snapshotRank(candidate)
   if (!right) return current
   if (!left) return candidate
-  if (right[0] !== left[0]) return right[0] > left[0] ? candidate : current
-  return right[1] >= left[1] ? candidate : current
+  for (let index = 0; index < left.length; index += 1) {
+    if (right[index] !== left[index]) return right[index] > left[index] ? candidate : current
+  }
+  // Equal on every key: the candidate is not demonstrably newer, so the incumbent
+  // stays rather than being replaced by an indistinguishable copy.
+  return current
+}
+
+// A Map evicts by key, never by value. Handing `delete` the value — which this
+// used to do, via `values().next().value` — makes every delete a no-op, and the
+// `while` around it then spins forever the moment the cap is reached. `keys()`
+// is the whole fix; the function exists so the two callers cannot drift apart.
+function dropOldest(map, limit) {
+  while (map.size > limit) {
+    const oldest = map.keys().next()
+    if (oldest.done) break
+    map.delete(oldest.value)
+  }
+}
+
+// Bound what one publish writes. Sessions are ranked exactly as snapshots are, so
+// what survives is the work that got furthest, not the work that happened to be
+// inserted first.
+function prunePublishedSessions(sessions, limit) {
+  const entries = Object.entries(sessions)
+  if (entries.length <= limit) return sessions
+  entries.sort((left, right) => {
+    const a = snapshotRank(left[1])
+    const b = snapshotRank(right[1])
+    if (!a || !b) return 0
+    for (let index = 0; index < a.length; index += 1) {
+      if (a[index] !== b[index]) return b[index] - a[index]
+    }
+    return 0
+  })
+  const kept = Object.create(null)
+  for (const [sessionID, snapshot] of entries.slice(0, limit)) kept[sessionID] = snapshot
+  return kept
 }
 
 function normalizeOptions(raw) {
@@ -500,9 +546,12 @@ const HANDLED_TYPES = new Set([
   "session.tool.input.delta",
   "session.tool.input.ended",
 ])
-// Known and deliberately not measured: synthetic inbox items, usage records and
-// single bookkeeping events are somebody else's business, and none of them is
-// model output.
+// Known and deliberately not measured: synthetic inbox items, usage records,
+// session lifecycle and single bookkeeping events are somebody else's business,
+// and none of them is model output. Before these names were listed, an ordinary
+// `session.status` or `session.created` was counted as an unknown event and
+// reported on every record and in a warning — which is precisely the noise the
+// unknown-event mechanism exists to avoid, aimed at the events it should trust.
 const IGNORED_TYPES = new Set([
   "session.synthetic",
   "session.usage.recorded",
@@ -513,6 +562,16 @@ const IGNORED_TYPES = new Set([
   "session.retry.scheduled",
   "session.step.streamed",
   "session.compaction.delta",
+  "session.created",
+  "session.deleted",
+  "session.moved",
+  "session.renamed",
+  "session.forked",
+  "session.status",
+  "session.permissions",
+  "session.compacted",
+  "session.inbox.cancelled",
+  "session.inbox.delivery.changed",
 ])
 // Whole families OpenCode emits around work this plugin does not measure: tool
 // execution (as opposed to session.tool.input.*, which is the model writing the
@@ -652,7 +711,7 @@ function createState(rawOptions, context = {}) {
     // One sink, not two: OpenCode's own logger when the host offers it, the
     // console otherwise. Writing the same line to both duplicated every
     // measurement in the log and in the terminal.
-    const app = ctx?.app ?? ctx?.client?.app
+    const app = ctx?.app
     if (app && typeof app.log === "function") {
       try {
         void Promise.resolve(app.log({
@@ -765,6 +824,13 @@ function createState(rawOptions, context = {}) {
       reasoningTokens: 0,
       generatedTokens: 0,
       activeStreamMs: 0,
+      // The rate's own numerator and denominator. `generatedTokens` and
+      // `activeStreamMs` above include work this session delegated to subagents,
+      // and a delegated token arrived with no streaming time of its own here — so
+      // dividing it by the parent's own time prints a speed the session never ran
+      // at. These two counters are this session's own turns alone.
+      ownGeneratedTokens: 0,
+      ownActiveStreamMs: 0,
       // Work this session delegated to subagents. A subagent runs as a child
       // session with its own stream time, so its tokens are counted here but
       // its time is not: adding them to the parent's rate would print a speed
@@ -777,6 +843,10 @@ function createState(rawOptions, context = {}) {
       // average the last ten instead of the whole session. A response without a
       // rate contributes nothing rather than a zero.
       recentRates: [],
+      // Bumped on every change to these totals. `turns` cannot rank a parent that
+      // has only been credited with delegated work, so the revision is what makes
+      // the newer of two such snapshots win instead of the older.
+      revision: 0,
       updatedAt: null,
     }
   }
@@ -815,6 +885,11 @@ function createState(rawOptions, context = {}) {
         for (const field of SUBAGENT_FIELDS) {
           totals[field] = numberOrNull(snapshot[field]) ?? 0
         }
+        // A snapshot from before this field existed has no delegated-token
+        // history to separate, so its own totals are all of it.
+        totals.ownGeneratedTokens = numberOrNull(snapshot.ownGeneratedTokens) ?? numberOrNull(snapshot.generatedTokens) ?? 0
+        totals.ownActiveStreamMs = numberOrNull(snapshot.ownActiveStreamMs) ?? numberOrNull(snapshot.activeStreamMs) ?? 0
+        totals.revision = numberOrNull(snapshot.revision) ?? 0
         if (typeof snapshot.project === "string" && snapshot.project) totals.project = snapshot.project
         totals.tokensPerSecond = numberOrNull(snapshot.tokensPerSecond) ?? null
         const recent = readRecentRates(snapshot.recentRates)
@@ -827,11 +902,14 @@ function createState(rawOptions, context = {}) {
       for (const field of ["outputTokens", "reasoningTokens", "generatedTokens"]) {
         if (Number.isFinite(record[field]) && record[field] > 0) totals[field] += record[field]
       }
+      if (Number.isFinite(record.generatedTokens) && record.generatedTokens > 0) totals.ownGeneratedTokens += record.generatedTokens
       if (Number.isFinite(record.activeStreamMs) && record.activeStreamMs > 0) {
         totals.activeStreamMs += record.activeStreamMs
+        totals.ownActiveStreamMs += record.activeStreamMs
       }
-      totals.tokensPerSecond = totals.activeStreamMs > 0 && totals.generatedTokens > 0
-        ? totals.generatedTokens / (totals.activeStreamMs / 1000)
+      totals.revision += 1
+      totals.tokensPerSecond = totals.ownActiveStreamMs > 0 && totals.ownGeneratedTokens > 0
+        ? totals.ownGeneratedTokens / (totals.ownActiveStreamMs / 1000)
         : totals.tokensPerSecond
       totals.updatedAt = typeof record.completedAt === "string" ? record.completedAt : totals.updatedAt
     }
@@ -1015,13 +1093,16 @@ function createState(rawOptions, context = {}) {
     const key = messageID ?? "unknown"
     const span = turn.spans.get(key)
     if (!span) {
-      turn.spans.set(key, { first: at, last: at })
+      turn.spans.set(key, { first: at, last: at, total: 0 })
       return
     }
     // A long silence under one message id is an interrupted stream that came
-    // back, not the model thinking. Counting the gap as streaming time is what
-    // makes a reconnect look like a slow model, so the span restarts instead.
+    // back, not the model thinking. The silence is not model time and must not be
+    // counted, but the streaming before it is: the earlier stretch is banked and
+    // the span starts again, so only the gap is dropped. Resetting `first` without
+    // banking threw the earlier time away and made a reconnect look fast.
     if (at - span.last > STREAM_GAP_LIMIT_MS) {
+      if (span.last > span.first) span.total += span.last - span.first
       span.first = at
       span.last = at
       return
@@ -1142,6 +1223,12 @@ function createState(rawOptions, context = {}) {
     let total = 0
     let count = 0
     for (const span of turn.spans.values()) {
+      // Banked stretches count even when the live one has no width: a stream that
+      // was interrupted and never resumed still streamed before the gap.
+      if (Number.isFinite(span.total) && span.total > 0) {
+        total += span.total
+        count += 1
+      }
       if (Number.isFinite(span.first) && Number.isFinite(span.last) && span.last > span.first) {
         total += span.last - span.first
         count += 1
@@ -1234,8 +1321,14 @@ function createState(rawOptions, context = {}) {
     if (Number.isFinite(record.activeStreamMs) && record.activeStreamMs > 0) {
       totals.activeStreamMs += record.activeStreamMs
     }
-    totals.tokensPerSecond = totals.activeStreamMs > 0 && totals.generatedTokens > 0
-      ? totals.generatedTokens / (totals.activeStreamMs / 1000)
+    // The rate is taken from this session's own turns only. Tokens a subagent
+    // contributed are in `generatedTokens` above for the totals, but they have no
+    // time of their own on this session, so they must not reach the denominator.
+    if (Number.isFinite(record.generatedTokens) && record.generatedTokens > 0) totals.ownGeneratedTokens += record.generatedTokens
+    if (Number.isFinite(record.activeStreamMs) && record.activeStreamMs > 0) totals.ownActiveStreamMs += record.activeStreamMs
+    totals.revision += 1
+    totals.tokensPerSecond = totals.ownActiveStreamMs > 0 && totals.ownGeneratedTokens > 0
+      ? totals.ownGeneratedTokens / (totals.ownActiveStreamMs / 1000)
       : totals.tokensPerSecond
     pushRecentRate(totals, numberOrNull(record.tokensPerSecond) ?? NaN)
     totals.updatedAt = record.completedAt
@@ -1243,7 +1336,7 @@ function createState(rawOptions, context = {}) {
     // active long-running session is not dropped while an idle newer one stays.
     sessionTotals.delete(sessionID)
     sessionTotals.set(sessionID, totals)
-    while (sessionTotals.size > 50) sessionTotals.delete(sessionTotals.values().next().value)
+    dropOldest(sessionTotals, MAX_SESSION_TOTALS)
     return { ...totals, recentRates: [...totals.recentRates] }
   }
 
@@ -1267,10 +1360,14 @@ function createState(rawOptions, context = {}) {
     }
     parent.subagentTurns += 1
     parent.subagentSteps += Number.isFinite(record.stepCount) ? record.stepCount : 0
-    // activeStreamMs, tokensPerSecond and recentRates are deliberately untouched.
+    // activeStreamMs, tokensPerSecond and recentRates are deliberately untouched:
+    // a delegated token has no delegated time on this session. The revision is
+    // bumped so a serialized publish replaces the older on-disk snapshot — the two
+    // rank equal on `turns` alone, since this parent may take no turn of its own.
+    parent.revision += 1
     sessionTotals.delete(parentID)
     sessionTotals.set(parentID, parent)
-    while (sessionTotals.size > 50) sessionTotals.delete(sessionTotals.values().next().value)
+    dropOldest(sessionTotals, MAX_SESSION_TOTALS)
   }
 
   // OpenCode runs setup once per project directory, so several instances of this
@@ -1284,7 +1381,10 @@ function createState(rawOptions, context = {}) {
     // two of them finishing a turn at once could each write over the other. The
     // same lock `persist` takes is taken here for the same reason.
     await withStorageLock(async () => {
-      const sessions = {}
+      // `Object.create(null)`: a session id is server-generated, but a plain
+      // object would let an id like `__proto__` rewire the map instead of
+      // storing a session in it, and a null prototype costs nothing.
+      const sessions = Object.create(null)
       for (const [sessionID, totals] of sessionTotals) sessions[sessionID] = totals
       let existing = null
       try {
@@ -1301,7 +1401,7 @@ function createState(rawOptions, context = {}) {
       }
       await writeJsonAtomic(SESSION_TOTALS_FILE, {
         version: 1,
-        sessions,
+        sessions: prunePublishedSessions(sessions, MAX_PUBLISHED_SESSIONS),
         updatedAt: new Date().toISOString(),
       })
     })
@@ -1703,6 +1803,9 @@ export const vitalsInternals = {
   pruneResponseMarkers,
   snapshotRank,
   newerSnapshot,
+  dropOldest,
+  prunePublishedSessions,
+  MAX_SESSION_TOTALS,
   normalizeOptions,
 }
 
@@ -1713,6 +1816,14 @@ export default {
     const runtime = runtimeFor(ctx.location?.directory, project)
     runtime.controller?.abort()
     if (runtime.companionTimer) clearInterval(runtime.companionTimer)
+    // A reload of the same location reaches here with the previous instance still
+    // holding its marker timer and its entry in the readout pool, because its own
+    // cleanup is not called when OpenCode runs setup again. Both are released
+    // here; the shared server is left alone, because other projects may use it.
+    if (runtime.markerTimer) clearInterval(runtime.markerTimer)
+    runtime.markerTimer = null
+    if (runtime.state) readoutStates.delete(runtime.state)
+    runtime.state = null
     const controller = new AbortController()
     runtime.controller = controller
     const state = createState(ctx.options, { project })
@@ -1747,6 +1858,7 @@ export default {
       // cleanup took the readout away from every other open project, and nothing
       // started it again until that project reloaded.
       readoutStates.delete(state)
+      if (runtime.state === state) runtime.state = null
       if (readoutServer && readoutStates.size === 0) {
         // The listening socket, closed with the plugin that opened it. unref()
         // stops it holding the event loop open, which is a different thing: the
@@ -1769,6 +1881,7 @@ export default {
     if (state.options.popup) {
       try {
         readoutStates.add(state)
+        runtime.state = state
         initialSync = startReadout(state)
         companionTimer = setInterval(() => {
           const synced = syncReadout()

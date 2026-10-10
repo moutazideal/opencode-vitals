@@ -4,6 +4,73 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.17] - 2026-10-10
+
+An audit of the measurement and the installer. Nothing here changes what the
+readout looks like; it changes what it says, and it keeps the plugin from being
+able to stop OpenCode.
+
+### Fixed
+
+- **The plugin could hang after 51 sessions.** The in-memory session table was
+  evicted with `Map.delete(values().next().value)` — a value where a key is
+  required — so every eviction was a no-op and the `while` around it spun
+  forever the moment the cap was reached, blocking the event loop. It evicts by
+  key now. This was the most serious finding of the audit and had no test.
+- **An interrupted stream lost the time it streamed before the gap.** A silence
+  longer than 30 seconds under one message resets the stream span so the gap is
+  not counted; resetting `first` also threw away everything streamed before it,
+  which made a reconnect look fast instead of slow. The earlier stretch is banked
+  now, so only the gap is dropped.
+- **A session's tok/s was inflated by its subagents' tokens.** Delegated tokens
+  are counted in the parent's totals but arrive with none of the parent's stream
+  time; the rate was recomputed from those totals on the parent's next own turn,
+  dividing the subagent's tokens by the parent's seconds. The rate is taken from
+  the session's own tokens and time now, while the totals still show the delegated
+  work.
+- **A second subagent credit to a parent with no turn of its own was dropped from
+  the published totals.** Two such snapshots rank equal on `turns` alone, and the
+  tie preferred the older on-disk one. Snapshots carry a revision counter now, so
+  the newer credit wins.
+- **A malformed request target could crash the readout server.** `new URL` throws
+  on some request lines (`//..%2f..`, `///`) and the throw was uncaught, in the
+  plugin host. A bad target is a 400 now and the server stays up.
+- **A shell that vanished between the check and the open was an uncaught stream
+  error.** The document is served through the same guarded helper the assets use.
+- **Registering the package never removed a copy already in the plugin
+  directory.** The check read `stale.installed`, a field `describeExisting` does
+  not return, so both shapes stayed and the plugin loaded twice. The copy is
+  removed directly — not through `uninstall`, which would have unregistered the
+  package just added.
+- **Every successful install printed "OpenCode has X, not X".** `register()` was
+  called without the version being installed, so its comparison was skipped and
+  the state was always reported as outdated.
+- **Ordinary session lifecycle events were counted as unknown measurements.**
+  `session.status`, `session.created`, `session.renamed` and seven others landed
+  in `unknownEventTypes` and produced a warning, the exact noise the unknown-event
+  mechanism exists to avoid. They are named as ignored now.
+- A reload of one location leaked its marker timer and readout-pool entry, since
+  its cleanup is not run when OpenCode runs setup again.
+- A quoted `Exec` in the system launcher hid the binary (the quotes stayed on the
+  path), and a binary with a space was written unquoted into the entry this plugin
+  writes.
+- `OPENCODE_VITALS_PORT` was used unvalidated: an empty or junk value made the
+  launcher entry point the window at a port nothing could listen on.
+- The launcher host reported every application exit as success. It forwards the
+  application's own exit code now.
+- A slow server could stack concurrent polls, because `setInterval` does not await
+  an async callback. A poll now skips while one is already in flight.
+- The published totals file grew one entry per session forever; it is capped at
+  200, ranked so the work that got furthest survives.
+- `session-totals.json` was written through a plain object; a `__proto__` session
+  id could have rewired it instead of being stored.
+- Uninstall now also removes a stale storage lock and a half-written atomic temp
+  file, and honours an explicit status directory when it stops the legacy bar.
+
+### Measured
+
+- 482 checks, up from 454.
+
 ## [0.1.16] - 2026-10-10
 
 An OpenCode update no longer needs a second launch to open the window.

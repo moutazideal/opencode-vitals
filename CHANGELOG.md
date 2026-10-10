@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-10-10
+
+An OpenCode update no longer needs a second launch to open the window.
+
+### Fixed
+
+- **Updating OpenCode could still show "ERR_CONNECTION_REFUSED".** The launcher
+  host is started by the launcher entry and lives as long as the window. When the
+  app closed for an update, the host closed with it — and the update relaunches
+  the app a moment later, against a port the restarted service had not bound yet.
+  The host now keeps serving through a grace period after the window closes, so
+  the relaunched window meets a server; it leaves only if nothing comes back.
+
+### Measured
+
+- 454 checks, up from 453.
+
 ## [0.1.15] - 2026-10-10
 
 A cold start no longer greets the window with a refused connection.

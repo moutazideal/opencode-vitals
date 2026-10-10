@@ -2828,6 +2828,19 @@ const S_B = `ses_mergeB${unique.slice(0, 15)}`
   check("host: when something already answers, the window is still pointed at it", launched[2].options.env.ELECTRON_RENDERER_URL === `http://127.0.0.1:${readoutInternals.PORT}`)
 }
 
+// The grace period: when the window closes the server is not closed at once,
+// because an OpenCode update relaunches the app a moment later and the restarted
+// service has not bound the port yet. The host is run as a subprocess with a
+// child that exits at once, and it must outlive that exit.
+{
+  const hostUrl = new URL("../host.mjs", import.meta.url).href
+  const script = `import(${JSON.stringify(hostUrl)}).then((m) => m.launch([], { app: "/bin/true", start: async () => ({ close() {} }), health: async () => false, graceMs: 600 }))`
+  const started = Date.now()
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 8_000 })
+  const elapsed = Date.now() - started
+  check("host: it keeps serving through the update gap after the window closes", result.status === 0 && elapsed >= 550, `${elapsed}ms status=${result.status}`)
+}
+
 // The check count printed in the page is a claim like any other, so it is
 // checked. It counts this check too, which is why the expected value is one more
 // than the results so far.

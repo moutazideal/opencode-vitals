@@ -92,7 +92,15 @@ export async function startServer({ port = PORT } = {}) {
 // The launcher's mode: make sure a server answers, then open the window pointed
 // at it. The window is opened without a readout only when nothing is listening
 // and nothing could be started.
-export async function launch(args, { app = process.execPath, spawn: run = spawn, start = startServer, health = healthy } = {}) {
+//
+// When the window closes the server is not closed at once. An OpenCode update
+// relaunches the app a moment later, and that new window asks the same port
+// while the restarted service has not bound one yet: closing here would be the
+// refused connection this host exists to prevent. So it keeps serving through a
+// grace period and leaves only if nothing comes back.
+export const LAUNCH_GRACE_MS = 45_000
+
+export async function launch(args, { app = process.execPath, spawn: run = spawn, start = startServer, health = healthy, graceMs = LAUNCH_GRACE_MS } = {}) {
   let server = null
   let serving = await health()
   if (!serving) {
@@ -114,13 +122,18 @@ export async function launch(args, { app = process.execPath, spawn: run = spawn,
     try { server?.close() } catch {}
     return null
   }
-  const done = () => {
-    // The window is gone, so nothing needs the port; leaving the server behind
-    // would be a process the plugin never started and cannot stop.
-    try { server?.close() } catch {}
+  const finish = (code) => {
+    const leave = () => {
+      // The window is gone and nothing came back; leaving the server behind
+      // would be a process the plugin never started and cannot stop.
+      try { server?.close() } catch {}
+      process.exit(code)
+    }
+    if (server) setTimeout(leave, graceMs)
+    else leave()
   }
-  child.on("exit", () => { done(); process.exit(0) })
-  child.on("error", () => { done(); process.exit(1) })
+  child.on("exit", () => finish(0))
+  child.on("error", () => finish(1))
   return child
 }
 
